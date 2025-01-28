@@ -1,0 +1,86 @@
+---
+title: "04.2 Feature ablations"
+output: html_document
+date: '2025-21-01'
+---
+
+
+```{r, setup}
+suppressPackageStartupMessages({
+library(TfBindingMultiAssay)
+library(phastCons100way.UCSC.hg38)
+library(BSgenome.Hsapiens.UCSC.hg38)
+library(EnsDb.Hsapiens.v86)
+library(TFBlearner)
+library(gam)})
+
+set.seed(42)
+```
+
+```{r, paths}
+mae <- readRDS("../data/mae_small.rds")
+mae <- mae[,colnames(mae) %in% unique(subset(sampleMap(mae), is_training)$colname),]
+
+fpPath <- "../data/consensus_footprints_and_collapsed_motifs_hg38.bed"
+embDir <- "/mnt/germain/plger/dhs_seq_dr/new/embedding.rds"
+cofactorMap <- readRDS("../data/cofactorMaps.rds")
+```
+
+```{r}
+selectedTfs <- c("JUN", "CTCF", "ATF3", "MYOG", "MYC", "ZNF143", "MAX")
+```
+
+```{r}
+fpData <- fread(fpPath, select=c(1:3,5), 
+                col.names=c("chr", "start", "end", "mean_signal"))
+emb <- readRDS(embDir)
+colnames(emb) <- paste("Embed", 1:ncol(emb), sep="_")
+embDts <- lapply(colnames(emb), function(col){
+  embDt <- as.data.table(emb[,col], keep.rownames=TRUE)
+  setnames(embDt, "V2", "score")
+  embDt[,c("chr", "coord"):=tstrsplit(V1, split=":")]
+  embDt[,c("start", "end"):=tstrsplit(coord, split="-", type.convert=TRUE)]
+  embDt$V1 <- NULL
+  embDt
+  })
+names(embDts) <- colnames(emb)
+annoData <- append(embDts, list("footprint_score"=fpData))
+mae <- siteFeatures(mae, annoData=annoData, 
+                    scoreCols=c(rep("score", length(embDts)), "mean_signal"), 
+                    minoverlap=1, shift=FALSE)
+
+for(tf in selectedTfs){
+  tfCofactors <- unique(subset(cofactorMap, tf_train==tf)$tf_train_cofactor)
+  mae <- tfFeatures(mae, tfName=tf, tfCofactors=tfCofactors)
+  contexts <- getContexts(mae, tfName=tf)
+  
+  for(context in contexts){
+    # Discuss: This is very strict and could also be done in a one-pass with whichCol="All") (just the chromVAR scores are then computed across training and testing ATAC-seq data but no testing labels are ever uses)
+    maeTrain <- contextTfFeatures(mae, tfName=tf, addLabels=TRUE, whichCol="OnlyTrain")
+    fmTrain <- getFeatureMatrix(maeTrain, tfName=tf, addLabels=TRUE, whichCol="OnlyTrain")
+    
+    maeAll <- contextTfFeatures(mae, tfName=tf, addLabels=TRUE, whichCol="All") # here which col so that chromVAR is computed across all cols => maybe explicitly specificy that chromVAR ATAC is always only calculated on the train data?
+    fmVal <- getFeatureMatrix(maeAll, tfName=tf, addLabels=TRUE, whichCol="Col",
+                              colSel=context)
+    features <- listFeatures()
+    lapply(features, function(feature){
+    # train bagged model
+      modBag <- trainBagged(modBag, )
+      predsBag <- predictTfBindingBagged(mod, fmVal)
+      modStack <- trainStacked(fm, modBag, stackingStrat="last", numThreads=4)
+      predsStacked <- predictTfBindingStacked(modStack, fm, predsBag)
+          
+      # get area under the curves
+      TFBlearner::.get
+      auprDt <- data.table()
+    })
+    
+    names(auprDts) <- names(mods) 
+    auprDt <- rbindlist(auprDts, idcol="training_strategy")
+    auprDt$tf <- tf
+    auprDt$context <- context
+    auprAllDt <- rbind(auprAllDt, auprDt)
+    saveRDS(auprAllDt, "auprModelCompDt.rds")
+  }
+}
+```

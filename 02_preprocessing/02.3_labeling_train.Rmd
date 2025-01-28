@@ -1,0 +1,145 @@
+---
+title: "02.3 Labels & Weights"
+output: html_document
+date: '2024-07-05'
+params: 
+  outDir: 
+    label: "outDir"
+    value: ./outDir
+---
+
+```{r, setup}
+suppressPackageStartupMessages({
+  library(BiocParallel)
+  library(data.table)
+  library(gam)
+  library(GenomicRanges)
+  library(ggplot2)
+  library(Matrix)
+  library(MatrixGenerics)
+  library(TFBlearner)
+  source("utils.R")
+})
+
+set.seed(42)
+```
+
+```{r, paths}
+outDir <- params$outDir
+
+metaTrainData <- readRDS("../data/meta_data/02_trainMetaAll.rds")
+metaDataChIP <- readRDS("../data/meta_data/01_fullMetaChIPAll.rds")
+
+metaDataChIP <- subset(metaDataChIP, 
+                       combination_id %in% metaTrainData$combination_id)
+
+refCoords <- readRDS("../data/hybrid.custom.hg38.resized.resplit.rds")
+#refCoords <- as.data.table(refCoords)
+#refCoords <- subset(refCoords, seqnames %in% c(paste("chr", 1:22,  sep="")))
+#refCoords <- makeGRangesFromDataFrame(as.data.frame(refCoords))
+```
+
+```{r, determine replicated experiments}
+metaDataChIP[,n_exp:=length(unique(chip_experiment_id)), by=combination_id]
+```
+
+```{r, setup training matrix, error=TRUE, warning=FALSE, eval=FALSE}
+metaChIPRep <- subset(metaDataChIP, n_exp>=2)
+repCombs <- unique(metaChIPRep$combination_id)
+repStats <- getLabels(repCombs, metaChIPRep, refCoords, subset=TRUE)
+```
+
+```{r, train models, error=TRUE, eval=FALSE}
+repDt <- lapply(repStats, function(e) e$repDt)
+repDt <- rbindlist(repDt)
+
+corsDt <- lapply(repStats, function(e) as.data.table(e$corsPICS, 
+                                                     keep.rownames=TRUE))
+corsDt <- rbindlist(corsDt)
+colnames(corsDt) <- c("caller", "spearman_cor")
+corsDt[,caller:=tstrsplit(caller, split=".", fixed=TRUE, keep=2)]
+
+corsDt <- subset(corsDt, !is.na(spearman_cor))
+ggplot(corsDt, aes(x=caller, y=spearman_cor))+
+  geom_boxplot()
+
+ggplot(repDt, aes(x=label_rep, y=qValue))+
+  geom_boxplot()+
+  scale_y_log10()
+
+ggplot(repDt, aes(x=is_uncertain, y=qValue))+
+  geom_boxplot()+
+  scale_y_log10()
+
+ggplot(repDt, aes(x=is_only_PICS, y=qValue))+
+  geom_boxplot()+
+  scale_y_log10()
+```
+
+```{r, fit gam, error=TRUE, eval=FALSE}
+repDt <- subset(repDt, is.finite(qValue))
+testInd <- sample(1:nrow(repDt), 1e4)
+repTrainDt <- repDt[setdiff(1:nrow(repDt), testInd)]
+repTestDt <- repDt[testInd,]
+
+mod <- gam::gam(label_rep ~ s(qValue, spar=0.6), 
+                data=repTrainDt, family="binomial")
+
+predTest <- predict(mod, 
+                    as.data.frame(as.matrix(repTestDt)), 
+                    type="response")
+repTestDt$pred <- predTest
+repTestDt$model <- "gam"
+
+aucPrPred <- TFBlearner:::.getRocs(repTestDt, scores="pred", 
+                                   posClass=TRUE, negClass=FALSE,
+                                   labels="label_rep", models="model")
+unique(aucPrPred$auc_pr_mod)
+aucPrQval <- TFBlearner:::.getRocs(repTestDt, scores="qValue", 
+                                   posClass=TRUE, negClass=FALSE,
+                                   labels="label_rep", models="model")
+unique(aucPrQval$auc_pr_mod)
+```
+
+```{r, plot gam, error=TRUE}
+plot.Gam(mod, se=TRUE)
+```
+
+```{r, save model, error=TRUE, eval=FALSE}
+saveRDS(mod, "../data/gam_rep.rds")
+save(mod, file = "../../TFBlearner/R/sysdata.rda")
+```
+
+```{r, reprocess, warning=FALSE, error=TRUE}
+mod <- readRDS("../data/gam_rep.rds")
+fns <- lapply(unique(metaDataChIP$combination_id), function(comb){
+  res <- getLabels(c(comb), metaDataChIP, refCoords, 
+                   subset=FALSE, annotate=TRUE)
+  labelDt <- res[[1]]$repDt
+  labelDt$rep_prob <- predict(mod, 
+                              newdata=data.frame(qValue=labelDt$qValue), 
+                              type="response")
+  labelDt[,rep_prob:=fifelse(label_rep,1,rep_prob)]
+  labelDt[,rep_prob:=fifelse(is_uncertain, 1, rep_prob)]
+
+  metaSub <- subset(metaDataChIP, combination_id==comb)
+  fn <- paste(comb, unique(metaSub$tf_name), 
+                    unique(metaSub$cellular_context_id),
+                    unique(metaSub$treatment_id),
+             "label.rds", sep="_")
+  saveRDS(labelDt, file.path(outDir, fn))
+  return(fn)
+})
+
+metaLabel <- data.table(file_name=unlist(fns))
+metaLabel[,file_path:=file.path(outDir, file_name)]
+metaLabel[,c("combination_id", 
+             "tf_name",
+             "cellular_context_id", 
+             "treatment_id"):=tstrsplit(file_name, split="_", keep=1:4)]
+saveRDS(metaLabel, "../data/meta_data/03_trainMetaChIPAll.rds")
+```
+
+```{r, sessioninfo}
+sessionInfo()
+```

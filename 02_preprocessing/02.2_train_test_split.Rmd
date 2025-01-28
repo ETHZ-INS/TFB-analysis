@@ -1,0 +1,47 @@
+---
+title: "02.2 Train-Test-Split"
+output: html_document
+date: "2025-21-01"
+---
+
+```{r, setup}
+library(data.table)
+library(knitr)
+```
+
+Import metadata:
+```{r}
+meta <- readRDS("../data/meta_data/01_fullReMetaAll.rds")
+```
+
+```{r, results="asis"}
+metaAg <- meta[,.(n_chIP_peak_files=sum(!is.na(unique(chip_path_re))),
+                  conditions=sum(!is.na(unique(treatment_id))),
+                  n_tfs=sum(!is.na(unique(tf_name))),
+                  n_atac_files=sum(!is.na(unique(atac_path))),
+                  n_caller=sum(!is.na(unique(caller)))), 
+               by=.(cellular_context)]
+setorder(metaAg, -n_tfs)
+kable(metaAg, title="captured celullar contexts")
+```
+
+Test cellular contexts: Embryonic stem cells & jurkat
+```{r, split of test}
+test <- subset(meta, grepl("jurkat", cellular_context, ignore.case=TRUE) | 
+                     grepl("WA", cellular_context, ignore.case=TRUE) |
+                     grepl("embryonic", cellular_context, ignore.case=TRUE))
+unique(test$cellular_context_id)
+unique(test$treatment_id)
+unique(test$tf_name)
+
+train <- meta[!test, on=c("cellular_context_id", 
+                          "chip_experiment_id", 
+                          "atac_experiment_id")]
+
+saveRDS(train, "../data/meta_data/02_trainMetaAll.rds")
+saveRDS(test, "../data/meta_data/02_testMetaAll.rds")
+```
+
+```{r, sessioninfo}
+sessionInfo()
+```

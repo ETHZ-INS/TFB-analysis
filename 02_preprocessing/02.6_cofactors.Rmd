@@ -1,0 +1,53 @@
+---
+title: "02.6 Cofactors"
+output: html_document
+date: '2025-21-01'
+---
+
+```{r, setup}
+suppressPackageStartupMessages({
+  library(data.table)
+  library(OmnipathR)
+  library(tidyr)
+})
+```
+
+```{r}
+allTfs <- readRDS("../data/allTfs.rds")
+
+library(OmnipathR)
+library(tidyr)
+
+  # get the cofactors
+cofactors <- as.data.table(import_omnipath_interactions() %>% as_tibble())
+# get tf-tf (prot) interactions
+cofactors <- subset(cofactors, source_genesymbol %in% allTfs &   
+                               target_genesymbol %in% allTfs)
+
+# either source or target needs to be amongst the covered tfs
+cofactors <- subset(cofactors, target_genesymbol %in% allTfs | 
+                               source_genesymbol %in% allTfs)
+cofactors[,tf_train:=fifelse(source_genesymbol %in% allTfs, 
+                             source_genesymbol, 
+                             target_genesymbol)]
+cofactors[,tf_train_cofactor:=fifelse(source_genesymbol!=tf_train, 
+                                      source_genesymbol, 
+                                      target_genesymbol)]
+cofactors <- cofactors[,c("tf_train", "tf_train_cofactor"), with=FALSE]
+cofactors[,pair1:=paste(tf_train, tf_train_cofactor, sep=":")]
+cofactors[,pair2:=paste(tf_train_cofactor, tf_train, sep=":")]
+cofactors1 <- cofactors[, c("pair1"), with=FALSE]
+cofactors1[,c("tf_train", "tf_train_cofactor"):=tstrsplit(pair1, split=":")]
+cofactors2 <- cofactors[, c("pair2"), with=FALSE]
+cofactors2[,c("tf_train", "tf_train_cofactor"):=tstrsplit(pair2, split=":")]
+
+cofactors <- rbind(cofactors1[,c("tf_train", "tf_train_cofactor")], 
+                   cofactors2[,c("tf_train", "tf_train_cofactor")])
+cofactors <- unique(cofactors, by=c("tf_train", "tf_train_cofactor"))
+saveRDS(cofactors, "../data/cofactorMaps.rds")
+```
+
+```{r, sessioninfo}
+print(Sys.Date())
+sessionInfo()
+```

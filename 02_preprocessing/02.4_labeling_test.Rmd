@@ -1,0 +1,74 @@
+---
+title: "02.4 Labels & Weights"
+output: html_document
+date: '2025-21-01'
+params: 
+  outDir: 
+    label: "outDir"
+    value: ./outDir
+---
+
+```{r, setup}
+suppressPackageStartupMessages({
+  library(BiocParallel)
+  library(data.table)
+  library(gam)
+  library(GenomicRanges)
+  library(ggplot2)
+  library(Matrix)
+  library(MatrixGenerics)
+  library(TFBlearner)
+  source("utils.R")
+})
+
+set.seed(42)
+```
+
+```{r, paths}
+metaTestData <- readRDS("../data/meta_data/02_testMetaAll.rds")
+metaDataChIP <- readRDS("../data/meta_data/01_fullMetaChIPAll.rds")
+
+metaDataChIP <- subset(metaDataChIP, 
+                       combination_id %in% metaTestData$combination_id)
+
+refCoords <- readRDS("../data/hybrid.custom.hg38.resized.resplit.rds")
+outDir <- params$outDir
+```
+
+```{r, load gam model, eval=TRUE}
+mod <- readRDS("../data/gam_rep.rds")
+```
+
+```{r, reprocess, eval=TRUE, warning=FALSE}
+# two-pass a bit suboptimal 
+fns <- lapply(unique(metaDataChIP$combination_id), function(comb){
+  res <- getLabels(c(comb), metaDataChIP, refCoords, 
+                   subset=FALSE, annotate=TRUE)
+  labelDt <- res[[1]]$repDt
+  labelDt$rep_prob <- predict(mod, 
+                              newdata=data.frame(qValue=labelDt$qValue),
+                              type="response")
+  labelDt[,rep_prob:=fifelse(label_rep,1,rep_prob)]
+  labelDt[,rep_prob:=fifelse(is_uncertain, 1, rep_prob)]
+
+  metaSub <- subset(metaDataChIP, combination_id==comb)
+  fn <- paste(comb, unique(metaSub$tf_name), 
+                    unique(metaSub$cellular_context_id),
+                    unique(metaSub$treatment_id),
+             "label.rds", sep="_")
+  saveRDS(labelDt, file.path(outDir, fn))
+  return(fn)
+})
+
+metaLabel <- data.table(file_name=unlist(fns))
+metaLabel[,file_path:=file.path(outDir, file_name)]
+metaLabel[,c("combination_id", 
+             "tf_name",
+             "cellular_context_id", 
+             "treatment_id"):=tstrsplit(file_name, split="_", keep=1:4)]
+saveRDS(metaLabel, "../data/meta_data/03_testMetaChIPAll.rds")
+```
+
+```{r, sessioninfo}
+sessionInfo()
+```

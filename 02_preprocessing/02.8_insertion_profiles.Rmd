@@ -1,0 +1,130 @@
+---
+title: "03.2 Insertion profiles"
+output: html_document
+date: '2023-07-05'
+params: 
+  motifDir: 
+    label: "motifDir"
+    value: ./motifData
+---
+
+```{r, setup}
+suppressPackageStartupMessages({
+  library(TfBindingMultiAssay)
+  library(phastCons100way.UCSC.hg38)
+  library(BSgenome.Hsapiens.UCSC.hg38)
+  library(EnsDb.Hsapiens.v86)
+  library(ggplot2)
+  library(viridis)
+  library(patchwork)
+  library(RColorBrewer)
+  library(TFBlearner)
+})
+```
+
+```{r, paths}
+allTfs <- readRDS("../data/allTfs.rds")
+maePath <- "../data/mae_small.rds" #"../data/mae_all.rds"
+motifDir <- params$motifDir
+```
+
+# Calculate Profile for each cellular context X Tf
+
+```{r, per context profiles, eval=TRUE}
+mae <- readRDS(maePath)
+
+# subset to training only data
+mae <- mae[,colData(mae)$is_training]
+
+refCoords <- rowRanges(experiments(mae)$Motifs)
+chIPMeta <- as.data.table(subset(sampleMap(mae), assay=="ChIP"))
+atacMeta <- as.data.table(subset(colData(experiments(mae)$ATAC)))
+chIPMeta[,c("context", "tf"):=tstrsplit(colname, split="_", keep=1:2)]
+
+lapply(allTfs, function(tfI){
+  
+  tryCatch({
+  contexts <- unique(subset(chIPMeta, tf==tfI)$context)
+  
+  motifFileName <- file.path(motifDir, paste0(tfI, ".rds"))
+  if(file.exists(motifFileName)){
+  motifMatches <- readRDS(file.path(motifDir,
+                                    paste0(tfI, ".rds")))
+  seqlevelsStyle(motifMatches) <- seqlevelsStyle(refCoords)
+  motifMatches <- subsetByOverlaps(motifMatches, refCoords)
+  
+  lapply(contexts, function(contextI){
+    atacPath <- unlist(unique(subset(atacMat, context==contextI)$origin))
+    fragData <- lapply(atacPath, .processData, shift=FALSE)
+    fragData <- rbindlist(fragData)
+    
+    # subset by overlapping ChIP-peak
+    pki <- which(assays(experiments(mae)$ChIP)$peaks[,paste(contextI,tfI, sep="_"),drop=FALSE]>0.5)
+    
+    motifSubMatches <- subsetByOverlaps(motifMatches,rowRanges(experiments(mae)$ChIP)[pki])
+    
+    if(length(motifSubMatches)>0){
+    motifSubMatches$motif_id <- tfI
+    
+    ins <- getInsertionProfiles(atacData=fragData,
+                                motifRanges=motifSubMatches,
+                                margin=200,
+                                calcProfile=TRUE,
+                                stranded=TRUE,
+                                symmetric=FALSE)
+    
+    saveRDS(ins$profile, file.path("../data/insertion_profiles", 
+                            paste0(paste(tfI, contextI, sep="_"), ".rds")))
+    return(NULL)}
+    else{
+      return(NULL)
+    }
+  })}
+  else{
+    return(NULL)
+  }},
+  error=function(cond){
+    message(paste("Could not compute insertion profiles for", tfI))
+    message(conditionMessage(cond))
+    return(NULL)
+  })
+})
+
+```
+
+
+# Insertion Profiles
+
+```{r, mean/median profiles, eval=TRUE}
+insFiles <- list.files("../data/insertion_profiles")
+insFiles <- insFiles[!grepl("median", insFiles) & !grepl("_plot", insFiles)]
+insFiles <- data.table(file_name=insFiles)
+insFiles[,c("tf", "context"):=tstrsplit(file_name, split="_", keep=1:2)]
+insFiles[,context:=substr(context, 1, nchar(context)-4)]
+
+lapply(unique(insFiles$tf), function(tfI){
+  subInsFiles <- subset(insFiles, tf==tfI)
+  paths <- file.path("../data/insertion_profiles", subInsFiles$file_name)
+  
+  profiles <- lapply(paths, readRDS)
+  names(profiles) <- subInsFiles$context
+  
+  profiles <- rbindlist(profiles, idcol="context")
+  profilesMean <- profiles[,.(w_r=median(w)), by=rel_pos]
+  profilesMean[,w:=as.numeric(smooth(w_r, twiceit=TRUE))]
+  
+  profilesMean$context <- "median"
+  medianProfilePlot <- ggplot(profiles, aes(x=rel_pos, y=w, group=context))+
+    geom_line(color="grey", alpha=0.7)+
+    geom_line(data=profilesMean, mapping=aes(x=rel_pos, y=w, context="median"), 
+              color="darkred")+
+    ggtitle(tfI)+
+    theme_bw()
+  ggsave(file.path("../data/insertion_profiles", 
+                   paste(tfI, "plot.png", sep="_")), medianProfilePlot)
+  
+  saveRDS(profilesMean, file.path("../data/insertion_profiles", 
+                                  paste(tfI, "median.rds", sep="_")))
+  
+})
+```

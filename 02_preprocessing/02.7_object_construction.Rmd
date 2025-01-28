@@ -1,0 +1,153 @@
+---
+title: "02.7 Object construction"
+output: html_document
+date: '2025-21-01'
+---
+
+```{r, setup}
+suppressPackageStartupMessages({
+library(TfBindingMultiAssay)
+library(phastCons100way.UCSC.hg38)
+library(BSgenome.Hsapiens.UCSC.hg38)
+library(EnsDb.Hsapiens.v86)
+library(TFBlearner)
+library(gam)})
+
+set.seed(42)
+```
+
+
+## Prepare Data
+
+### Meta data
+```{r, prepare meta data}
+# read all ATAC data & label test data
+trainMetaAll <- readRDS("../data/meta_data/02_trainMetaAll.rds")
+testMetaAll <- readRDS("../data/meta_data/02_testMetaAll.rds")
+
+trainMetaChIP <- readRDS("../data/meta_data/03_trainMetaChIPAll.rds")
+trainMetaChIP <- unique(trainMetaChIP, by="file_path")
+trainMetaChIP[,full_id:=paste(cellular_context_id, treatment_id, sep="-")]
+testMetaChIP <- readRDS("../data/meta_data/03_testMetaChIPAll.rds")
+testMetaChIP[,full_id:=paste(cellular_context_id, treatment_id, sep="-")]
+
+trainMetaAtac <- subset(trainMetaAll, !is.na(atac_path))
+trainMetaAtac <- unique(trainMetaAtac, by="atac_path")
+
+trainMetaAtac <- subset(trainMetaAtac, 
+                        atac_path!="/mnt/nvme1/atac_tfbs/GlutamatergicNeuron/fragsInDhs.rds")
+
+trainMetaAtac[,full_id:=paste(cellular_context_id, treatment_id, sep="-")]
+testMetaAtac <- subset(testMetaAll, !is.na(atac_path))
+testMetaAtac <- unique(testMetaAtac, by="atac_path")
+testMetaAtac[,full_id:=paste(cellular_context_id, treatment_id, sep="-")]
+```
+
+### Reference Coordinates
+
+```{r}
+# DHS sites + mouse liftover DHS + ATLAS ATAC peaks
+coords <- readRDS("../data/hybrid.custom.hg38.resized.resplit.rds")
+```
+
+### Cofactors
+
+```{r, get the cofactors}
+allTfs <- readRDS("../data/allTfs.rds")
+allCofactors <- readRDS("../data/allCofactors.rds")
+```
+
+### Motif
+
+
+```{r, attach additional motif data, eval=TRUE}
+motifData <- list.files("../data/motifs", full.names=TRUE)
+motifData <- motifData[(grepl("_motif", basename(motifData)) | 
+                        grepl("_dinucMotif", basename(motifData)) | 
+                        grepl("_dimerMotif", basename(motifData))) & 
+                        !grepl("_scoreMatrix", basename(motifData))]
+names(motifData) <- unlist(tstrsplit(basename(motifData), 
+                                     split=".", fixed=TRUE, keep=1))
+```
+
+## Tf promoter coordinates
+
+```{r, tf promoter coordinates}
+edb <- EnsDb.Hsapiens.v86
+tfs <- c(allTfs,allCofactors)
+txCoords <- transcripts(edb, 
+                        columns=c("tx_seq_start"),
+                        filter=GeneNameFilter(tfs))
+end(txCoords) <- start(txCoords)+300
+start(txCoords) <- start(txCoords)-300
+txCoords <- as.data.table(txCoords)
+txCoords[,seqnames:=paste0("chr", seqnames)]
+setnames(txCoords, "gene_name", "tf_name")
+txCoords <- makeGRangesFromDataFrame(as.data.frame(txCoords), 
+                                     keep.extra.columns=TRUE)
+names(txCoords) <- txCoords$tx_id
+seqlevelsStyle(txCoords) <- "UCSC"
+txCoords <- keepStandardChromosomes(txCoords, pruning.mode="coarse")
+```
+
+## Object construction
+
+```{r arguments object, error=TRUE}
+atacDataTrain <- c(trainMetaAtac$atac_path)
+names(atacDataTrain) <- trainMetaAtac$full_id
+atacDataTest <- c(testMetaAtac$atac_path)
+names(atacDataTest) <- testMetaAtac$full_id
+atacData <- as.list(c(atacDataTrain, atacDataTest))
+
+chIPDataTrain <- c(trainMetaChIP$file_path)
+names(chIPDataTrain) <- paste(trainMetaChIP$full_id, 
+                              trainMetaChIP$tf_name, sep="_")
+                              
+chIPDataTest <- c(testMetaChIP$file_path)
+names(chIPDataTest) <- paste(testMetaChIP$full_id,
+                             testMetaChIP$tf_name, sep="_")
+chIPData <- as.list(c(chIPDataTrain, chIPDataTest))
+```
+
+```{r small object, error=TRUE, eval=TRUE}
+maeSmall <- prepData(refCoords=coords, 
+                motifData=motifData[1:20],
+                atacData=atacData[1:10],
+                chIPData=chIPData[1:10],
+                promoterCoords=txCoords,
+                testSet=names(atacData)[1:2], 
+                weightCol="rep_prob",
+                isUncertainCol="is_uncertain", 
+                saveHdf5=TRUE,
+                outDir="./mae_small")
+saveRDS(maeSmall, "./mae_small/mae_small_hdf5.rds")
+gc()
+```
+
+```{r, construct object full, error=TRUE, eval=TRUE}
+mae <- prepData(refCoords=coords, 
+                motifData=motifData,
+                atacData=atacData,
+                chIPData=chIPData,
+                promoterCoords=txCoords,
+                testSet=names(atacDataTest), 
+                weightCol="rep_prob",
+                isUncertainCol="is_uncertain",
+                saveHdf5=TRUE,
+                outDir="../data")
+saveRDS(mae, "../data/mae_all_hdf5.rds")
+gc()
+mae <- prepData(refCoords=coords, 
+                motifData=motifData,
+                atacData=atacData,
+                chIPData=chIPData,
+                promoterCoords=txCoords,
+                testSet=names(atacDataTest), 
+                weightCol="rep_prob",
+                isUncertainCol="is_uncertain")
+saveRDS(mae, "../data/mae_all.rds")
+```
+
+```{r}
+sessionInfo()
+```

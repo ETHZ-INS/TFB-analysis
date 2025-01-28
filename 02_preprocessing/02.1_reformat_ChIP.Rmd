@@ -1,0 +1,148 @@
+---
+title: "02.1 Reformatting ChIP-peaks"
+output: html_document
+date: "2025-21-01"
+params: 
+  outDir: 
+    label: "outDir"
+    value: ./outDir
+---
+
+```{r, setup}
+library(data.table)
+```
+
+Import metadata:
+```{r}
+metaData <- readRDS("../data/meta_data/fullMetaAll.rds")
+outDir <- params$outDir
+metaChIP <- unique(metaData, by=c("chip_paths"))
+metaChIP <- subset(metaChIP, !is.na(caller))
+
+#minRefChr <- c(paste("chr", c(1:22, "X", "Y"),  sep=""))
+```
+
+```{r, export q-value, warning=FALSE, message=FALSE}
+missed <- c()
+missed <- lapply(1:nrow(metaChIP), function(i){
+  print(i)
+  missing <- FALSE
+  if(metaChIP$caller[i]=="MACS2"){
+    if(metaChIP$origin_chIP[i]=="ENCODE" |
+       metaChIP$origin_chIP[i]=="codebook"){
+      chIPReDt <- fread(metaChIP$chip_paths[i])
+      if(ncol(chIPReDt)==10){
+        chIPReDt <- chIPReDt[,paste0("V", c(1:3,9,10)), with=FALSE]
+        colnames(chIPReDt) <- c("chr", "start", "end", "qValue", "dist_center")
+      }else{
+        print("missing")
+        missing <- TRUE
+        missed <- c(missed, metaChIP$chip_paths[i])
+      }
+    }
+    else if(metaChIP$origin_chIP[i]=="GTRD"){
+      # manually checked with
+      # http://gtrd20-06.biouml.org/bioumlweb/#de=databases/GTRD/Data/peaks/macs2/PEAKS054472
+      chIPReDt <- fread(metaChIP$chip_paths[i], 
+                        select=c(1:3,10, 6), 
+                        col.names=c("chr", "start", 
+                                    "end", "qValue",
+                                    "center"))
+    }
+    else if(metaChIP$origin_chIP[i]=="brainTF"){
+      gr <- readRDS(metaChIP$chip_paths[i])
+      chIPReDt <- as.data.table(gr)
+      chIPReDt <- chIPReDt[,c("seqnames", "start", "end",
+                              "qValue", "peak"), with=FALSE]
+      setnames(chIPReDt, c("seqnames", "peak"),
+                         c("chr", "dist_center"))
+    }
+    
+    if(!missing & metaChIP$origin_chIP[i]!="GTRD"){
+    chIPReDt[,center:=start+dist_center]
+    chIPReDt$dist_center <- NULL}
+  }
+  else if(metaChIP$caller[i]=="SISSRS"){
+    # manually checked with
+    # http://gtrd20-06.biouml.org/bioumlweb/#de=databases/GTRD/Data/peaks/sissrs/PEAKS054472
+    
+    chIPReDt <- fread(metaChIP$chip_paths[i])
+    if(ncol(chIPReDt)==9){
+      chIPReDt <- chIPReDt[,c(paste0("V", c(1:3,8)))]
+      setnames(chIPReDt, c(paste0("V", c(1:3,8))),
+                         c("chr", "start", "end", "pValue"))
+      chIPReDt[,qValue:=-log10(p.adjust(pValue)+1e-8)]
+      chIPReDt[,center:=floor((end-start)/2)+start]
+      chIPReDt$pValue <- NULL 
+    }
+    else{
+      print("missing")
+      missing <- TRUE
+      missed <- c(missed, metaChIP$chip_paths[i])
+    }
+  }
+  else if(metaChIP$caller[i]=="PICS"){
+    chIPReDt <- fread(metaChIP$chip_paths[i], 
+                        select=c(1:3,6), 
+                        col.names=c("chr", "start", "end", 
+                                    "signal")) #
+    setorder(chIPReDt, -signal)
+    chIPReDt[,center:=floor((end-start)/2)+start]
+  }
+  else if(metaChIP$caller[i]=="GEM"){
+    # mannually checked the columns
+    # http://gtrd20-06.biouml.org/bioumlweb/#de=databases/GTRD/Data/peaks/gem/PEAKS054472
+    chIPReDt <- fread(metaChIP$chip_paths[i], 
+                        select=c(1:3,10), 
+                        col.names=c("chr", "start", "end", 
+                                    "qValue"))
+    chIPReDt[,center:=floor((end-start)/2)+start]
+  }
+ 
+  # filter ChIP-seq experiments that do not cover 
+  # commonChr <- intersect(chIPReDt$chr, minRefChr)
+  # if(length(commonChr)<length(minRefChr)){
+  #   missing < TRUE
+  #   missed <- c(missed, metaChIP$chip_paths[i])
+  # }
+
+  if(!missing){
+    if(metaChIP$caller[i]!="PICS"){
+     chIPReDt[,is_uncertain:=fifelse(qValue>-log10(0.05), FALSE, TRUE)]}
+  
+    fn <- basename(metaChIP$chip_paths[i])
+    fn <- paste(unlist(tstrsplit(fn, split=".", fixed=TRUE, keep=1)), 
+              "qval.rds", sep="_")
+    saveRDS(chIPReDt, file.path(outDir, fn))}
+  
+  return(missed)
+})
+missed <- unlist(missed)
+
+metaChIP[,chip_filename_re:= paste(unlist(tstrsplit(basename(chip_paths), 
+                                                    split=".", fixed=TRUE, 
+                                                    keep=1)), 
+                                  "qval.rds", sep="_"), 
+         by=seq_len(nrow(metaChIP))]
+metaChIP[,chip_path_re:=file.path(outDir, chip_filename_re)]
+
+metaData[,chip_filename_re:= paste(unlist(tstrsplit(basename(chip_paths), 
+                                                    split=".", fixed=TRUE, 
+                                                    keep=1)), 
+                                  "qval.rds", sep="_"), 
+         by=seq_len(nrow(metaData))]
+metaData[,chip_path_re:=file.path(outDir, chip_filename_re)]
+metaData[,chip_filename_re:=fifelse(is.na(chip_paths), NA, chip_filename_re)]
+metaData[,chip_path_re:=fifelse(is.na(chip_paths), NA, chip_path_re)]
+
+metaData <- subset(metaData,!(chip_paths %in% missed))
+metaChIP <- subset(metaChIP,!(chip_paths %in% missed))
+
+saveRDS(metaChIP, "../data/meta_data/01_fullMetaChIPAll.rds")
+saveRDS(metaData, "../data/meta_data/01_fullReMetaAll.rds")
+saveRDS(missed, "../data/meta_data/sortedOutChIPs.rds")
+```
+
+```{r, sessioninfo}
+sessionInfo()
+```

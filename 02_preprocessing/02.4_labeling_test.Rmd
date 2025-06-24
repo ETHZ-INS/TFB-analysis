@@ -21,7 +21,8 @@ suppressPackageStartupMessages({
   source("utils.R")
 })
 
-set.seed(42)
+seed <- 42
+set.seed(seed)
 ```
 
 ```{r, paths}
@@ -33,6 +34,8 @@ metaDataChIP <- subset(metaDataChIP,
 
 refCoords <- readRDS("../data/hybrid.custom.hg38.resized.resplit.rds")
 outDir <- params$outDir
+
+if(!dir.exists(outDir)) dir.create(outDir)
 ```
 
 ```{r, load gam model, eval=TRUE}
@@ -53,8 +56,7 @@ fns <- lapply(unique(metaDataChIP$combination_id), function(comb){
 
   metaSub <- subset(metaDataChIP, combination_id==comb)
   fn <- paste(comb, unique(metaSub$tf_name), 
-                    unique(metaSub$cellular_context_id),
-                    unique(metaSub$treatment_id),
+                    unique(metaSub$context_id),
              "label.rds", sep="_")
   saveRDS(labelDt, file.path(outDir, fn))
   return(fn)
@@ -64,8 +66,7 @@ metaLabel <- data.table(file_name=unlist(fns))
 metaLabel[,file_path:=file.path(outDir, file_name)]
 metaLabel[,c("combination_id", 
              "tf_name",
-             "cellular_context_id", 
-             "treatment_id"):=tstrsplit(file_name, split="_", keep=1:4)]
+             "cellular_context_id"):=tstrsplit(file_name, split="_", keep=1:3)]
 saveRDS(metaLabel, "../data/meta_data/03_testMetaChIPAll.rds")
 ```
 

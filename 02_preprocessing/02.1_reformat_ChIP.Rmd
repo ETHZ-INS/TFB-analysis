@@ -19,7 +19,7 @@ outDir <- params$outDir
 metaChIP <- unique(metaData, by=c("chip_paths"))
 metaChIP <- subset(metaChIP, !is.na(caller))
 
-#minRefChr <- c(paste("chr", c(1:22, "X", "Y"),  sep=""))
+if(!dir.exists(outDir)) dir.create(outDir)
 ```
 
 ```{r, export q-value, warning=FALSE, message=FALSE}
@@ -99,12 +99,11 @@ missed <- lapply(1:nrow(metaChIP), function(i){
     chIPReDt[,center:=floor((end-start)/2)+start]
   }
  
-  # filter ChIP-seq experiments that do not cover 
-  # commonChr <- intersect(chIPReDt$chr, minRefChr)
-  # if(length(commonChr)<length(minRefChr)){
-  #   missing < TRUE
-  #   missed <- c(missed, metaChIP$chip_paths[i])
-  # }
+  # filter ChIP-seq experiments that have very few chromosomes
+  if(length(unique(chIPReDt$chr))<5){
+    missing < TRUE
+    missed <- c(missed, metaChIP$chip_paths[i])
+  }
 
   if(!missing){
     if(metaChIP$caller[i]!="PICS"){

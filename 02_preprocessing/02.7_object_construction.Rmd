@@ -2,20 +2,31 @@
 title: "02.7 Object construction"
 output: html_document
 date: '2025-21-01'
+params: 
+  motifDir: 
+    label: "motifDir"
+    value: ./motifs
 ---
 
 ```{r, setup}
 suppressPackageStartupMessages({
-library(TfBindingMultiAssay)
-library(phastCons100way.UCSC.hg38)
 library(BSgenome.Hsapiens.UCSC.hg38)
 library(EnsDb.Hsapiens.v86)
+library(parallel)
 library(TFBlearner)
-library(gam)})
+library(data.table)
+library(GenomicRanges)
+library(BiocParallel)
+library(parallel)
+})
 
-set.seed(42)
+seed <- 42
+set.seed(seed)
 ```
 
+```{r, params}
+motifDir <- params$motifDir
+```
 
 ## Prepare Data
 
@@ -27,20 +38,19 @@ testMetaAll <- readRDS("../data/meta_data/02_testMetaAll.rds")
 
 trainMetaChIP <- readRDS("../data/meta_data/03_trainMetaChIPAll.rds")
 trainMetaChIP <- unique(trainMetaChIP, by="file_path")
-trainMetaChIP[,full_id:=paste(cellular_context_id, treatment_id, sep="-")]
+trainMetaChIP[,full_id:=cellular_context_id]
+
 testMetaChIP <- readRDS("../data/meta_data/03_testMetaChIPAll.rds")
-testMetaChIP[,full_id:=paste(cellular_context_id, treatment_id, sep="-")]
+testMetaChIP[,full_id:=cellular_context_id]
 
 trainMetaAtac <- subset(trainMetaAll, !is.na(atac_path))
 trainMetaAtac <- unique(trainMetaAtac, by="atac_path")
+trainMetaAtac[,full_id:=context_id]
+#trainMetaAtac <- subset(trainMetaAtac, context!="Glutamatergic_Neuron")
 
-trainMetaAtac <- subset(trainMetaAtac, 
-                        atac_path!="/mnt/nvme1/atac_tfbs/GlutamatergicNeuron/fragsInDhs.rds")
-
-trainMetaAtac[,full_id:=paste(cellular_context_id, treatment_id, sep="-")]
 testMetaAtac <- subset(testMetaAll, !is.na(atac_path))
 testMetaAtac <- unique(testMetaAtac, by="atac_path")
-testMetaAtac[,full_id:=paste(cellular_context_id, treatment_id, sep="-")]
+testMetaAtac[,full_id:=context_id]
 ```
 
 ### Reference Coordinates
@@ -55,19 +65,16 @@ coords <- readRDS("../data/hybrid.custom.hg38.resized.resplit.rds")
 ```{r, get the cofactors}
 allTfs <- readRDS("../data/allTfs.rds")
 allCofactors <- readRDS("../data/allCofactors.rds")
+cofactorMap <- readRDS("../data/cofactorMaps.rds")
 ```
 
 ### Motif
 
 
 ```{r, attach additional motif data, eval=TRUE}
-motifData <- list.files("../data/motifs", full.names=TRUE)
-motifData <- motifData[(grepl("_motif", basename(motifData)) | 
-                        grepl("_dinucMotif", basename(motifData)) | 
-                        grepl("_dimerMotif", basename(motifData))) & 
-                        !grepl("_scoreMatrix", basename(motifData))]
-names(motifData) <- unlist(tstrsplit(basename(motifData), 
-                                     split=".", fixed=TRUE, keep=1))
+motifData <- list.files(motifDir, full.names=TRUE, recursive=TRUE)
+motifData <- motifData[!(grepl("scoreMatrix", motifData))]
+names(motifData) <- gsub(".rds","", basename(motifData))
 ```
 
 ## Tf promoter coordinates
@@ -109,19 +116,40 @@ names(chIPDataTest) <- paste(testMetaChIP$full_id,
 chIPData <- as.list(c(chIPDataTrain, chIPDataTest))
 ```
 
-```{r small object, error=TRUE, eval=TRUE}
+```{r small object, error=TRUE, eval=FALSE}
+tfs <- c("JUN", "ATF3", "MYOG")
+trainChIPMetaSmall <- subset(trainMetaChIP, tf_name %in% tfs)
+trainAtacMetaSmall <- subset(trainMetaAtac, 
+                             full_id %in% trainChIPMetaSmall$full_id)
+atacDataSmall <- c(trainAtacMetaSmall$atac_path)
+names(atacDataSmall) <- trainAtacMetaSmall$full_id
+
+chIPDataSmall <- c(trainChIPMetaSmall$file_path)
+names(chIPDataSmall) <- paste(trainChIPMetaSmall$full_id, 
+                              trainChIPMetaSmall$tf_name, sep="_")
+
+tfs <- c(tfs, subset(cofactorMap, tf_train %in% tfs)$tf_train_cofactor)
+subNames <- grep(paste(tfs,collapse="|"), names(motifData), value=TRUE)
+motifDataSmall <- motifData[names(motifData) %in% subNames] 
+
+outDirSmall <- "./mae_small"
+if(!dir.exists(outDirSmall)) dir.create(outDirSmall)
 maeSmall <- prepData(refCoords=coords, 
-                motifData=motifData[1:20],
-                atacData=atacData[1:10],
-                chIPData=chIPData[1:10],
+                motifData=motifDataSmall,
+                atacData=atacDataSmall,
+                chIPData=chIPDataSmall,
                 promoterCoords=txCoords,
                 testSet=names(atacData)[1:2], 
                 weightCol="rep_prob",
                 isUncertainCol="is_uncertain", 
                 saveHdf5=TRUE,
-                outDir="./mae_small")
-saveRDS(maeSmall, "./mae_small/mae_small_hdf5.rds")
+                outDir=outDirSmall)
+saveRDS(maeSmall, file.path(outDirSmall, "mae_small_hdf5.rds"))
 gc()
+```
+
+```{r, setup threads full, eval=TRUE}
+BPPARAM <- SerialParam(force.GC=TRUE, log=TRUE, logdir=".")
 ```
 
 ```{r, construct object full, error=TRUE, eval=TRUE}
@@ -134,18 +162,14 @@ mae <- prepData(refCoords=coords,
                 weightCol="rep_prob",
                 isUncertainCol="is_uncertain",
                 saveHdf5=TRUE,
-                outDir="../data")
-saveRDS(mae, "../data/mae_all_hdf5.rds")
+                outDir=".", 
+                BPPARAM=BPPARAM)
+
+#atacData <- append(atacData[names(atacData)!="98-2"],
+#                   atacData[names(atacData)=="98-2"], after=0)
+
+saveRDS(mae, "maeAllHdf5.rds")
 gc()
-mae <- prepData(refCoords=coords, 
-                motifData=motifData,
-                atacData=atacData,
-                chIPData=chIPData,
-                promoterCoords=txCoords,
-                testSet=names(atacDataTest), 
-                weightCol="rep_prob",
-                isUncertainCol="is_uncertain")
-saveRDS(mae, "../data/mae_all.rds")
 ```
 
 ```{r}

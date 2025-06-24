@@ -44,7 +44,9 @@ cofactors2[,c("tf_train", "tf_train_cofactor"):=tstrsplit(pair2, split=":")]
 cofactors <- rbind(cofactors1[,c("tf_train", "tf_train_cofactor")], 
                    cofactors2[,c("tf_train", "tf_train_cofactor")])
 cofactors <- unique(cofactors, by=c("tf_train", "tf_train_cofactor"))
-saveRDS(cofactors, "../data/cofactorMaps.rds")
+setnames(cofactors, c("tf_train", "tf_train_cofactor"), c("tf", "tf_cofactor"))
+write.table(cofactors, "../data/cofactorMaps.tsv", sep="\t", 
+            col.names=TRUE, row.names=FALSE, quote=FALSE)
 ```
 
 ```{r, sessioninfo}

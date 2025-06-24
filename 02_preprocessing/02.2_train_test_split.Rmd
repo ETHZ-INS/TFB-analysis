@@ -16,27 +16,26 @@ meta <- readRDS("../data/meta_data/01_fullReMetaAll.rds")
 
 ```{r, results="asis"}
 metaAg <- meta[,.(n_chIP_peak_files=sum(!is.na(unique(chip_path_re))),
-                  conditions=sum(!is.na(unique(treatment_id))),
                   n_tfs=sum(!is.na(unique(tf_name))),
                   n_atac_files=sum(!is.na(unique(atac_path))),
                   n_caller=sum(!is.na(unique(caller)))), 
-               by=.(cellular_context)]
-setorder(metaAg, -n_tfs)
+               by=.(context)]
+setorder(metaAg, context)
+# subset(metaAg, n_tfs>0)
 kable(metaAg, title="captured celullar contexts")
 ```
 
 Test cellular contexts: Embryonic stem cells & jurkat
 ```{r, split of test}
-test <- subset(meta, grepl("jurkat", cellular_context, ignore.case=TRUE) | 
-                     grepl("WA", cellular_context, ignore.case=TRUE) |
-                     grepl("embryonic", cellular_context, ignore.case=TRUE))
-unique(test$cellular_context_id)
-unique(test$treatment_id)
-unique(test$tf_name)
+test <- subset(meta, grepl("jurkat", context, ignore.case=TRUE) | 
+                     grepl("WA", context, ignore.case=TRUE) |
+                     grepl("embryonic", context, ignore.case=TRUE))
+unique(subset(test,is_matched)$context_id)
+unique(subset(test, is_matched)$tf_name)
 
-train <- meta[!test, on=c("cellular_context_id", 
-                          "chip_experiment_id", 
-                          "atac_experiment_id")]
+train <- meta[!test, on=c("context_id", 
+                          "db_id_ATAC", 
+                          "db_id_chIP")]
 
 saveRDS(train, "../data/meta_data/02_trainMetaAll.rds")
 saveRDS(test, "../data/meta_data/02_testMetaAll.rds")

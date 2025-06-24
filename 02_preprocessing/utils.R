@@ -1,3 +1,7 @@
+testThreads <- function(){
+  print(getDTthreads())
+}
+
 maxNoZero <- function(x){
   m <- max(x)
   if(m==0){
@@ -20,7 +24,7 @@ getLabels <- function(combs, metaData, refCoords,
     metaSub <- subset(metaData, combination_id==comb)
     metaSub <- unique(metaSub, by="chip_path_re")
     chIPDt <- lapply(metaSub$chip_path_re,readRDS)
-    names(chIPDt) <- paste(1:length(chIPDt), metaSub$chip_experiment_id,
+    names(chIPDt) <- paste(1:length(chIPDt), metaSub$db_id_chIP,
                            metaSub$caller, sep="_")
     chIPDt <- rbindlist(chIPDt,
                         use.names=TRUE,

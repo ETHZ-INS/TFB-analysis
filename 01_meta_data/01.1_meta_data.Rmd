@@ -25,7 +25,8 @@ chIPFilesDir2 <- file.path(chIPFilesDirBase, "ENCODE")
 chIPFilesDir3 <- file.path(chIPFilesDirBase, "codebook")
 chIPFilesDir4 <- file.path(chIPFilesDirBase, "brainTF") 
 
-metaEncodePath <- "../data/meta_data/chip_metadata.rds"
+metaEncodePath <- "../data/meta_data/fileListEncode.tsv"
+#metaEncodePath <- "../data/meta_data/chip_metadata.rds"
 
 outDir <- "../data/meta_data"
 
@@ -128,13 +129,13 @@ metaExt <- merge(metaExt, metaExtOther,
 ## Annotate and subset metadata
 
 ```{r, meta GTRD: subset ATAC meta}
-atacFilePaths <- list.files(atacFilesDir, full.names=TRUE)
-atacFilePaths <- atacFilePaths[grepl("AEXP", atacFilePaths)]
-atacFilePaths <- file.path(atacFilePaths, "fragsInDhs.rds")
+atacFilePaths <- list.files(atacFilesDir, full.names=TRUE, recursive=TRUE)
+atacFilePaths <- atacFilePaths[grepl("AEXP", atacFilePaths) & 
+                               grepl("fragsInDhs.rds", atacFilePaths)]
 
 atacFilePaths <- data.table(file_path=atacFilePaths)
 atacFilePaths <- subset(atacFilePaths, file.exists(atacFilePaths$file_path))
-atacFilePaths[,file_name:=tstrsplit(file_path, split="/", keep=5)]
+atacFilePaths[,file_name:=basename(dirname(file_path))]
 atacFilePaths[,c("geo_id", "gtrd_id"):=tstrsplit(file_name, 
                                                  split=".", fixed=TRUE)]
 metaAtacGtrd <- merge(atacFilePaths, 
@@ -191,7 +192,7 @@ pathsSISSR <- list.files(absPath(chIPFilesDir1,
                          full.names=TRUE)
 pathsGEM <- list.files(absPath(chIPFilesDir1, 
                                "GEM_matched_ids/GEM_chIP_bed"), 
-                       full.names=TRUE)
+                       full.names=TRUE, recursive=TRUE)
 
 peakInfo <- data.table(file_name=c(peaksMACS2, peaksPICS2, 
                                    peaksSISSR, peaksGEM),
@@ -236,42 +237,49 @@ chIPEncodeFiles <- list.files(chIPFilesDir2,
                               full.names=TRUE, recursive=TRUE)
 chIPEncodeFileNames <- list.files(chIPFilesDir2, recursive=TRUE)
 chIPEncodeFiles <- data.table(chip_paths_encode=chIPEncodeFiles, 
-                              file_names=chIPEncodeFileNames)
-chIPEncodeFiles[,c("tf_name","context"):=tstrsplit(file_names, 
-                                                split="_", keep=c(2,5))]
-chIPEncodeFiles[,context:=tstrsplit(context, split=".", fixed=TRUE, keep=1)]
+                              base_dir=dirname(chIPEncodeFileNames),
+                              file_names=basename(chIPEncodeFileNames))
+chIPEncodeFiles[,c("encodeFileID", "tf_name"):=tstrsplit(file_names, 
+                                                     split="_", keep=1:2)]
+chIPEncodeFiles[,context:=base_dir]
 
-metaChIPEncode <- as.data.table(readRDS(metaEncodePath))
+metaChIPEncode <- fread(metaEncodePath)
 metaChIPEncode$from_encode <- TRUE
-setnames(metaChIPEncode, "gene", "tf_name")
-metaChIPEncode <- merge(metaChIPEncode, 
+metaChIPEncode[,encodeFileID:=Accession]
+metaChIPEncode[,encodeDatasetID:=basename(Dataset)]
+setnames(metaChIPEncode, "Target label", "tf_targets")
+metaChIPEncode <- merge(metaChIPEncode[,c("encodeFileID", "encodeDatasetID",
+                                          "tf_targets")], 
                         chIPEncodeFiles, 
-                        by.x=c("tf_name", "context"),
-                        by.y=c("tf_name", "context"), allow.cartesian=TRUE)
+                        by.x=c("encodeFileID"), by.y=c("encodeFileID"))
+                        #by.x=c("tf_name", "context"),
+                        #by.y=c("tf_name", "context"), allow.cartesian=TRUE)
 metaChIPEncode$origin <- "ENCODE"
 setnames(metaChIPEncode, "context", "title")
-metaChIPEncode$treatment <- "none"
+metaChIPEncode$treatment <- NA
 metaChIPEncode$caller <- "MACS2"
-
-metaChIPEncode[,db_id:=encodeID1]
+setnames(metaChIPEncode, "chip_paths_encode", "chip_paths")
+metaChIPEncode[,db_id:=encodeFileID]
 ```
 
 ```{r, meta ENCODE: meta ATAC}
-atacDirs <- list.dirs(atacFilesDir, recursive=FALSE)
+atacDirs <- list.dirs(atacFilesDir, recursive=TRUE)
 atacDirNames <- basename(atacDirs)
-atacDirs <- atacDirs[!grepl("AEXP", atacDirs)] # these are GTRD atac
-atacDirNames <- atacDirNames[!grepl("AEXP", atacDirNames)]
+toKeep <- grepl("encode", atacDirs)
+atacDirs <- atacDirs[toKeep]
+atacDirNames <- atacDirNames[toKeep]
 metaAtacEncode <- data.table(atac_path=file.path(atacDirs, "fragsInDhs.rds"), 
                              title=atacDirNames)
 
 metaAtacEncode <- subset(metaAtacEncode, !grepl("see_origin", title) & 
                                          !grepl("forBrainTF", title) & 
                                          !grepl("trimmed", title) & 
-                           title!="" & title!="merge")
+                           title!="" & title!="merge" & 
+                           file.exists(atac_path))
 metaAtacEncode[,title:=fifelse(grepl("HEK293", title), "HEK293", title)]
 metaAtacEncode$origin <- "ENCODE"
-metaAtacEncode$treatment <- "none"
-metaAtacEncode[,db_id:=title] # this is unclean
+metaAtacEncode$db_id <- NA
+metaAtacEncode$treatment <- NA
 ```
 
 # Codebook metadata
@@ -321,185 +329,183 @@ metaChIPBrainTf[,db_id:=context] # unclean
 ```
 
 ```{r, meta BrainTF: meta ATAC}
-atacDirs <- list.dirs(atacFilesDir, recursive=FALSE)
+atacDirs <- list.dirs(atacFilesDir, recursive=TRUE, full.names=TRUE)
 atacDirNames <- basename(atacDirs)
-atacDirs <- atacDirs[!grepl("AEXP", atacDirs)] # these are GTRD atac
-atacDirNames <- atacDirNames[!grepl("AEXP", atacDirNames)]
+toKeep <- grepl("forBrainTF", atacDirs)
+
+atacDirs <- atacDirs[toKeep]
+atacDirNames <- atacDirNames[toKeep]
 metaAtacBrainTf <- data.table(atac_path=file.path(atacDirs, 
                                                  "fragsInDhs.rds"), 
                               title=atacDirNames)
 
 metaAtacBrainTf <- subset(metaAtacBrainTf, grepl("forBrainTF", title) & 
                                           !grepl("see_origin", title) & 
-                            title!="" & title!="merge")
+                            title!="" & title!="merge" & 
+                            file.exists(atac_path))
 metaAtacBrainTf[,title:=gsub("forBrainTF.", "", title)]
 metaAtacBrainTf$treatment <- "none"
-metaAtacBrainTf[,db_id:=title] # unclean
+metaAtacBrainTf[,db_id:=title]
 metaAtacBrainTf$origin <- "brainTF"
+```
+
+# Other sources
+
+ATAC separately processed from ENCODE/GEO
+```{r, meta manual: meta ATAC}
+atacDirs <- list.dirs(atacFilesDir, recursive=TRUE, full.names=TRUE)
+atacDirNames <- basename(atacDirs)
+
+toKeep <- grepl("manual", atacDirs)
+atacDirs1 <- atacDirs[toKeep]
+atacDirNames1 <- atacDirNames[toKeep]
+
+toKeep <- grepl("prediction", atacDirs) 
+atacDirs2 <- atacDirs[toKeep]
+atacDirNames2 <- atacDirNames[toKeep]
+
+# remove contexts which are present in other files
+toKeep2 <- !(atacDirNames2 %in% atacDirNames1) & 
+           !(atacDirNames2 %in% metaAtacEncode$title)
+atacDirs2 <- atacDirs2[toKeep2]
+atacDirNames2 <- atacDirNames2[toKeep2]
+
+atacDirs <- c(atacDirs1, atacDirs2)
+atacDirNames <- c(atacDirNames1, atacDirNames2)
+
+metaAtacManual <- data.table(atac_path=file.path(atacDirs, "fragsInDhs.rds"), 
+                             title=atacDirNames)
+metaAtacManual <- subset(metaAtacManual, !grepl("trimmed", title) & 
+                                         !grepl("SRX", title) & 
+                                         !grepl("forBrainTF", title) &
+                           !grepl("aligned", title) &
+                           file.exists(atac_path))
+metaAtacManual$treatment <- "none"
+metaAtacManual[,db_id:=title]
+metaAtacManual$origin <- "manual"
 ```
 
 # Merge and match metadata
 
-Match with ENCODE ChIP-data. If both are present use ENCODE ChIP instead of GTRD ChIP.
+## Match GTRD
 
-```{r, rbind ATAC meta}
-colsAtac <- c("db_id", "title", "treatment", "atac_path", "origin")
-metaAtac <- rbindlist(list(metaAtacGtrd[,colsAtac, with=FALSE], 
-                           metaAtacEncode[,colsAtac, with=FALSE],
-                           metaAtacBrainTf[,colsAtac, with=FALSE]),
-                      use.names=TRUE, fill=TRUE)
-metaAtac[,atac_id:=as.integer(factor(metaAtac$db_id, 
-                                     levels=unique(metaAtac$db_id)))]
+```{r, match ChIP & ATAC GTRD}
+atacCols <- c("db_id", "title", "treatment", "atac_path", "origin")
+metaMatchGTRD <- merge(metaChIPGtrd,
+                       rbind(metaAtacGtrd[,atacCols,with=FALSE], 
+                             metaAtacManual[,atacCols,with=FALSE]),
+                       by.x=c("title", "treatment"), 
+                       by.y=c("title", "treatment"),
+                       all.x=TRUE,
+                       all.y=FALSE, allow.cartesian=TRUE)
+setnames(metaMatchGTRD, c("db_id.x", "db_id.y"), 
+                        c("db_id_chIP", "db_id_ATAC"))
+setnames(metaMatchGTRD, c("origin.x", "origin.y"), 
+                        c("origin_chIP", "origin_ATAC"))
 ```
 
-```{r, merge ChIP meta}
-# merge ENCODE and GTRD and use both open text cellular context & treatment labels
-metaChIP1 <- merge(subset(metaChIPGtrd, !is.na(ENCODEPROJ_chIP)), 
-                   subset(metaChIPEncode, !is.na(encodeID1)), 
-                   by.x=c("ENCODEPROJ_chIP"),
-                   by.y=c("encodeID1"),
-                   all=FALSE, allow.cartesian=TRUE)
-metaChIP2 <- merge(subset(metaChIPGtrd, !is.na(ENCODE_chIP)), 
-                   subset(metaChIPEncode, !is.na(encodeID2)), 
-                   by.x=c("ENCODE_chIP"),
-                   by.y=c("encodeID2"),
-                   all=FALSE, allow.cartesian=TRUE)
-metaChIP3 <- merge(subset(metaChIPGtrd, !is.na(GEO_experiment_chIP)), 
-                   subset(metaChIPEncode, !is.na(GEO)), 
-                   by.x=c("GEO_experiment_chIP"),
-                   by.y=c("GEO"),
-                   all=FALSE, allow.cartesian=TRUE)
-metaChIP4 <- merge(subset(metaChIPGtrd, !is.na(GEO_sample_chIP)), 
-                   subset(metaChIPEncode, !is.na(GEO)), 
-                   by.x=c("GEO_sample_chIP"),
-                   by.y=c("GEO"),
-                   all=FALSE, allow.cartesian=TRUE)
-metaChIPM1 <- rbindlist(list(metaChIP1, metaChIP2, 
-                             metaChIP3, metaChIP4))
+## Match ENCODE
 
-# if both present keep ENCODE (.y) but use GTRD title & treatment labels! (.x)
-metaChIPM1[,chip_paths:=chip_paths_encode]
-metaChIPM1[,origin:=origin.y]
-metaChIPM1[,db_id:=db_id.y]
-metaChIPM1[,caller:=caller.y]
-metaChIPM1[,treatment:=treatment.x]
-metaChIPM1[,title:=title.x]
-metaChIPM1[,tf_name:=tf_name.x]
-
-colsChIP <- c("db_id","tf_name","title", "treatment", 
-              "chip_paths", "origin", "caller")
-setnames(metaChIPEncode, "chip_paths_encode", "chip_paths")
-metaChIP <- rbindlist(list(metaChIPM1[,c(colsChIP), with=FALSE], 
-                           metaChIPGtrd[,colsChIP, with=FALSE], 
-                           metaChIPEncode[,colsChIP, with=FALSE],
-                           metaChIPCb[,colsChIP, with=FALSE], 
-                           metaChIPBrainTf[,colsChIP, with=FALSE]), 
-                      use.names=TRUE)
+```{r, match ChIP & ATAC ENCODE}
+atacCols <- c("db_id", "title", "atac_path", "origin")
+metaMatchEncode <- merge(metaChIPEncode, 
+                         rbind(metaAtacEncode[,atacCols,with=FALSE],
+                               metaAtacManual[,atacCols,with=FALSE]),
+                         by.x=c("title"), by.y=c("title"),
+                         all=TRUE, allow.cartesian=TRUE)
+setnames(metaMatchEncode, c("db_id.x", "db_id.y"), 
+                          c("db_id_chIP", "db_id_ATAC"))
+setnames(metaMatchEncode, c("origin.x", "origin.y"), 
+                          c("origin_chIP", "origin_ATAC"))
 ```
 
-```{r, merge ATAC & ChIP meta}
-metaMatch <- merge(metaChIP[,colsChIP, with=FALSE], 
-                   metaAtac[,colsAtac, with=FALSE], 
-                   by.x=c("title", "treatment"),
-                   by.y=c("title", "treatment"),
-                   suffixes=c("_chIP", "_atac"),
-                   allow.cartesian=TRUE, all=FALSE)
+## Match brainTf
 
-metaAll <- merge(metaChIP[,colsChIP, with=FALSE], 
-                 metaAtac[,colsAtac, with=FALSE], 
-                 by.x=c("title", "treatment"),
-                 by.y=c("title", "treatment"),
-                 suffixes=c("_chIP", "_atac"),
-                 allow.cartesian=TRUE, all=TRUE)
+```{r}
+atacCols <- c("db_id", "title", "treatment", "atac_path", "origin")
+metaMatchBrainTf <- merge(metaChIPBrainTf, 
+                          metaAtacBrainTf[,atacCols,with=FALSE],
+                          by.x=c("title", "treatment"), 
+                          by.y=c("title", "treatment"),
+                          all=TRUE, allow.cartesian=TRUE)
+setnames(metaMatchBrainTf, c("db_id.x", "db_id.y"), 
+                           c("db_id_chIP", "db_id_ATAC"))
+setnames(metaMatchBrainTf, c("origin.x", "origin.y"), 
+                           c("origin_chIP", "origin_ATAC"))
 ```
 
-```{r, clean-up the obvious ones}
-simContext <- unique(metaChIPM1[,c("title.x", "title.y"), with=FALSE])
-setnames(simContext, c("title.x","title.y"), c("title_gtrd", "title_encode"))
-metaMatch <- merge(metaMatch, 
-                   simContext, 
-                   by.x=c("title"),
-                   by.y=c("title_gtrd"), all.x=TRUE, all.y=FALSE)
-metaMatch[,title:=fifelse(!is.na(title_encode), title_encode, title)]
-metaMatch$title_encode <- NULL
+## Match Codebook
 
-metaAll <- merge(metaAll, 
-                 simContext, 
-                 by.x=c("title"),
-                 by.y=c("title_gtrd"), all.x=TRUE, all.y=FALSE)
-metaAll[,title:=fifelse(!is.na(title_encode), title_encode, title)]
-metaAll$title_encode <- NULL
+```{r}
+atacCols <- c("db_id", "title", "treatment", "atac_path", "origin")
+metaMatchCb <- merge(metaChIPCb, metaAtacManual, 
+                     by.x=c("title","treatment"), 
+                     by.y=c("title","treatment"), 
+                     all=TRUE,
+                     allow.cartesian=TRUE)
+setnames(metaMatchCb, c("db_id.x", "db_id.y"), 
+                      c("db_id_chIP", "db_id_ATAC"))
+setnames(metaMatchCb, c("origin.x", "origin.y"), 
+                      c("origin_chIP", "origin_ATAC"))
 ```
 
+## Merge meta-data
 
-# Re-assign IDS
+```{r, merge metadata}
+# prioritize ENCODE data if both is there
+metaMatchGTRDSub <- subset(metaMatchGTRD, 
+                           !(metaMatchGTRD$ENCODEPROJ_chIP %in% metaMatchEncode$encodeDatasetID))
+# 
+# atacCols <- c("db_id_ATAC", "title", "treatment", "atac_path", "origin_ATAC")
+# metaAtacAll <- rbind(metaMatchGTRDSub[,atacCols,with=FALSE],
+#                      metaMatchEncode[,atacCols,with=FALSE],
+#                      metaMatchBrainTf[,atacCols,with=FALSE],
+#                      metaMatchCb[,atacCols,with=FALSE])
+# metaAtacAll <- unique(metaAtacAll, by="atac_path")
+# 
+# chIPCols <- c("db_id_chIP", "title", "treatment", "chip_paths", "origin_chIP", "tf_name")
+# metaChIPcAll <- rbind(metaMatchGTRDSub[,chIPCols,with=FALSE],
+#                      metaMatchEncode[,chIPCols,with=FALSE],
+#                      metaMatchBrainTf[,chIPCols,with=FALSE],
+#                      metaMatchCb[,chIPCols,with=FALSE])
+# metaChIPAll <- unique(metaChIPcAll, by="chip_paths")
+# 
+# metaChIPAll[,treatment:=fifelse(is.na(treatment), "NA", treatment)]
+# metaAtacAll[,treatment:=fifelse(is.na(treatment), "NA", treatment)]
+# metaMatched <- merge(metaChIPAll, metaAtacAll, 
+#                      by.x=c("title", "treatment"), 
+#                      by.y=c("title", "treatment"),
+#                      all=TRUE, allow.cartesian=TRUE)
+# metaMatched[,is_matched:=fifelse(!is.na(atac_path) & !is.na(chip_paths), TRUE, FALSE)]
+# length(unique(subset(metaMatched, is_matched)$tf_name))
 
-```{r, assign IDs}
-metaMatch <- unique(metaMatch, by=c("atac_path", "chip_paths"))
+# alternative
+metaMatch <- rbindlist(list(metaMatchGTRDSub, 
+                            metaMatchEncode, 
+                            metaMatchCb, 
+                            metaMatchBrainTf), fill=TRUE, use.names=TRUE)
+metaMatch[,is_matched:=fifelse(!is.na(atac_path) & !is.na(chip_paths), TRUE, FALSE)]
+length(unique(subset(metaMatch, is_matched)$tf_name))
+length(unique(subset(metaMatch, is_matched)$title))
+length(unique(subset(metaMatch, is_matched)$treatment))
+metaMatch[,context:=paste(title, treatment,sep="_")]
+metaMatch[,context:=gsub("_NA", "", context)]
+length(unique(subset(metaMatch, is_matched)$context))
 
-# chIP-ID, ATAC-ID
-metaMatch[,atac_experiment_id:=as.integer(factor(db_id_atac,
-                                          levels=unique(metaMatch$db_id_atac)))]
-metaMatch[,chip_experiment_id:=as.integer(factor(db_id_chIP,
-                                          levels=unique(metaMatch$db_id_chIP)))]
-metaMatch[,treatment_id:=as.integer(factor(treatment,
-                                    levels=unique(metaMatch$treatment)))]
-metaMatch[,cellular_context_id:=as.integer(factor(title,
-                                levels=unique(metaMatch$title)))]
-setnames(metaMatch, "title", "cellular_context")
-
-# Combination id
-metaMatch[,combination_id:=paste(tf_name, cellular_context_id, 
-                                 treatment_id, sep="_")]
+metaMatch[,context_id:=as.integer(factor(context,
+                                         levels=unique(metaMatch$context)))]
+metaMatch[,tf_id:=as.integer(factor(tf_name, levels=unique(metaMatch$tf_name)))]
+metaMatch[,combination_id:=paste(tf_name, context, sep="_")]
 metaMatch[,combination_id:=as.integer(factor(combination_id, 
                                       levels=unique(metaMatch$combination_id)))]
+#metaMatch[,combination_id:=fifelse(is_matched, combination_id, NA)]
 
-
-metaAll <- unique(metaAll, by=c("atac_path", "chip_paths"))
-metaAll <- subset(metaAll, !is.na(db_id_atac) & !is.na(treatment) & 
-                           !is.na(title))
-
-# chIP-ID, ATAC-ID
-metaAll[,atac_experiment_id:=as.integer(factor(db_id_atac,
-                                        levels=unique(metaAll$db_id_atac)))]
-metaAll[,chip_experiment_id:=as.integer(factor(db_id_chIP,
-                                        levels=unique(metaAll$db_id_chIP)))]
-metaAll[,treatment_id:=as.integer(factor(treatment,
-                                    levels=unique(metaAll$treatment)))]
-metaAll[,cellular_context_id:=as.integer(factor(title,
-                                levels=unique(metaAll$title)))]
-setnames(metaAll, "title", "cellular_context")
-
-# Combination id
-print(dim(metaAll))
-metaAll[,combination_id:=paste(tf_name, cellular_context_id, 
-                               treatment_id, sep="_")]
-metaAll[,combination_id:=fifelse(is.na(tf_name) | is.na(db_id_chIP) | is.na(db_id_atac),
-                                 NA, combination_id)]
-metaAll[,matched:=fifelse(!is.na(tf_name) & !is.na(db_id_chIP) & !is.na(db_id_atac), 
-                          TRUE, FALSE)]
-metaAll[,combination_id:=as.integer(factor(combination_id, 
-                                    levels=unique(metaAll$combination_id)))]
-```
-
-```{r, save matched metadata}
-length(unique(metaMatch$tf_name))
-length(unique(metaMatch$cellular_context_id))
-length(unique(metaMatch$treatment_id))
-length(unique(metaMatch$combination_id))
-print(dim(metaMatch))
+metaMatchAll <- metaMatch
+metaMatch <- subset(metaMatch, is_matched)
 
 saveRDS(metaMatch, absPath(outDir, "fullMetaMatched.rds"))
-
-length(unique(metaAll$tf_name))
-length(unique(metaAll$cellular_context_id))
-length(unique(metaAll$treatment_id))
-length(unique(metaAll$combination_id))
-sum(metaAll$matched)
-print(dim(metaAll))
-saveRDS(metaAll, absPath(outDir, "fullMetaAll.rds"))
+saveRDS(metaMatchAll, absPath(outDir, "fullMetaAll.rds"))
 ```
-
 
 ```{r, sessioninfo}
 sessionInfo()

@@ -6,20 +6,22 @@ params:
   motifDir: 
     label: "motifDir"
     value: ./motifData
+  outDir: 
+    label: "outDir"
+    value: ./outDir
 ---
 
 ```{r, setup}
 suppressPackageStartupMessages({
-  library(BiocParallel)
   library(data.table)
-  library(HDF5Array)
-  library(TFBlearner)
+  library(GenomicRanges)
   library(GenomeInfoDb)
 })
 ```
 
 ```{r, paths}
 motifDir <- params$motifDir
+outDir <- params$outDir
 
 coordsPath <- "../data/hybrid.custom.hg38.resized.resplit.rds"
 chIPMetaPath <- "../data/meta_data/01_fullMetaChIPAll.rds"
@@ -38,7 +40,7 @@ allCoveredTfs <- allCoveredTfs[!is.na(allCoveredTfs)]
 ### Motif names
 
 ```{r}
-motifFiles <- list.files(motifDir, full.names=TRUE)
+motifFiles <- list.files(file.path(motifDir, "motifs"), full.names=TRUE)
 motifFiles <- motifFiles[grepl(".rds", motifFiles)]
 motifNames <- basename(motifFiles)
 motifNames <- unlist(tstrsplit(motifNames, split=".", fixed=TRUE, keep=1))
@@ -62,6 +64,7 @@ cofactors <- as.data.table(import_omnipath_interactions() %>% as_tibble())
 # get tf-tf (prot) interactions
 cofactors <- subset(cofactors, source_genesymbol %in% motifNames &   
                                target_genesymbol %in% motifNames)
+
 # either source or target needs to be amongst the covered tfs
 cofactors <- subset(cofactors, target_genesymbol %in% allCoveredTfs | 
                                source_genesymbol %in% allCoveredTfs)
@@ -77,7 +80,7 @@ saveRDS(allCofactors, "../data/allCofactors.rds")
 TFs being profiled
 All for which we have data + their cofactors
 ```{r, gathering motif names}
-motifFiles <- list.files(motifDir, full.names=TRUE)
+motifFiles <- list.files(file.path(motifDir, "motifs"), full.names=TRUE)
 motifFiles <- motifFiles[grepl(".rds", motifFiles)]
 motifNames <- basename(motifFiles)
 motifNames <- unlist(tstrsplit(motifNames, split=".", fixed=TRUE, keep=1))
@@ -89,42 +92,33 @@ motifFiles <- motifFiles[whichTfs]
 motifNames <- motifNames[whichTfs]
 ```
 
-```{r, preparing  motifs data, eval=TRUE}
-for(motifName in motifNames){
-  
-  motif <- readRDS(file.path(motifDir, paste0(motifName, ".rds")))
-  motif <- as.data.table(motif)
-  setnames(motif, "seqnames", "chr")
-  
-  saveRDS(motif, file.path("../data/motifs",
-                           paste0(paste(motifName, "motif", sep="_"), ".rds")))
-}
-```
-
 ```{r, preparing dimer motifs data, eval=TRUE}
 dimerMotifs <- readRDS("../data/motifs/dhs_dimer_motif_scoreMatrix.rds")
+outDirDimers <- file.path(outDir, "dimer_motifs")
+if(!dir.exists(outDirDimers)) dir.create(outDirDimers)
 
 for(dimer in colnames(dimerMotifs)){
   motif <- data.table(score=dimerMotifs[,dimer, drop=TRUE])
   motif <- cbind(as.data.table(coords), motif)
-  setnames(motif, "seqnames", "chr")
-  dimer <- gsub("_", ":", dimer)
+  motif <- makeGRangesFromDataFrame(as.data.frame(motif), keep.extra.columns=TRUE)
   
-  saveRDS(motif, file.path("../data/motifs",
+  saveRDS(motif, file.path(outDirDimers,
                            paste0(paste(dimer, "dimerMotif", sep="_"), ".rds")))
 }
 ```
 
 ```{r, preparing dinuc motifs data, eval=TRUE}
 dinucMotifs <- readRDS("../data/motifs/dhs_dinuc_motif_scoreMatrix.rds")
+outDirDinuc <- file.path(outDir, "dinucleotide_motifs")
+if(!dir.exists(outDirDinuc)) dir.create(outDirDinuc)
 
 for(dinuc in colnames(dinucMotifs)){
   motif <- data.table(score=dinucMotifs[,dinuc, drop=TRUE])
   motif <- cbind(as.data.table(coords), motif)
-  setnames(motif, "seqnames", "chr")
+  motif <- makeGRangesFromDataFrame(as.data.frame(motif), keep.extra.columns=TRUE)
   dinuc <- gsub("_", ":", dinuc)
   
-  saveRDS(motif, file.path("../data/motifs",
+  saveRDS(motif, file.path(outDirDinuc,
                            paste0(paste(dinuc, "dinucMotif", sep="_"), ".rds")))
 }
 ```

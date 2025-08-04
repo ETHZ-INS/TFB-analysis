@@ -117,7 +117,7 @@ setDTthreads(16)
 batchSize <- 2
 ptm <- proc.time()
 for(i in seq(1,length(predContexts), batchSize)){
-  predContextsBatch <- predContexts[i:(i+batchSize-1)]
+  predContextsBatch <- predContexts[i:min((i+batchSize-1),length(predContexts))]
   ptm3 <- proc.time()
   fms <- bplapply(predContextsBatch, function(context){
      mae <- contextTfFeatures(mae, 
@@ -149,9 +149,11 @@ for(i in seq(1,length(predContexts), batchSize)){
                                 BPPARAM=SerialParam())
     rm(fm)
     preds <- as.data.table(as.matrix(predCon[,c("pred_stacked",
+                                                "pred_all_pos",
                                                 "pred_stacked_binarized")]))
     rm(predCon)
     preds[,pred_stacked:=round(pred_stacked, 3)]
+    preds[,pred_all_pos:=round(pred_all_pos, 3)]
 
     if(context %in% trainingContexts){
         lab <- assays(mae[["ChIP"]])$peaks[,paste(context, tfName, sep="_")]

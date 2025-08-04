@@ -1,0 +1,520 @@
+---
+title: "03.4 Training"
+output: html_document
+date: '2025-21-01'
+params: 
+  tfName: 
+    label: "tfName"
+    value: ATF2
+  cofactors:
+    label: "cofactors"
+    value: ATF3
+  predContext:
+    label: "predContext"
+    value: !r c("A549")
+  maePath:
+    label: "maePath"
+    value: mae
+  profilesPath:
+    label: "profilesPath"
+    value: "./profiles/ATF2_profile.tsv"
+  outDir: 
+    label: "outDir"
+    value: "./out"
+  modelPath:
+    label: "modelPath"
+    value: ""
+  seed:
+    label: "seed"
+    value: 42
+  crossValidate:
+    label: "crossValidate"
+    value: TRUE
+---
+
+```{r, setup}
+suppressPackageStartupMessages({
+  library(BSgenome.Hsapiens.UCSC.hg38)
+  library(TFBlearner)
+  library(data.table)
+  library(BiocParallel)
+  library(R.utils)
+  library(ggplot2)
+  source("utils.R") # feature importance
+})
+print(Sys.time())
+ptmStart <- proc.time()
+```
+
+## Parameters
+
+```{r, parameters}
+seed <- params$seed
+set.seed(seed)
+
+numThreads <- min(16, getDTthreads())
+setDTthreads(numThreads)
+RcppML::setRcppMLthreads(numThreads)
+evalRounds <- 100
+nRowPerf <- 1e6
+
+tfName <- params$tfName
+profilesPath <- params$profilesPath
+modelPath <- params$modelPath
+predContexts <- params$predContext
+holdOutChr <- c("chr2", "chr4", "chr9")
+print(predContexts)
+
+if(file.exists(modelPath)){
+  modsFull <- loadModels(modelPath)
+  trainModel <- FALSE
+}else{
+  trainModel <- TRUE
+}
+
+outDir <- params$outDir
+if(!dir.exists(outDir)) dir.create(outDir)
+print(proc.time())
+```
+
+# Load inputs
+
+```{r, prepare meta data}
+mae <- readRDS(params$maePath)
+
+coords <- rowRanges(experiments(mae)[["ChIP"]])
+
+tfCofactors <- params$cofactors
+tfCofactors <- unique(tfCofactors)
+tfCofactors
+
+if(file.exists(profilesPath)){
+  if(grepl(".tsv", profilesPath)){
+    profile <- fread(profilesPath)
+  }
+  else{
+    profile <- readRDS(profilesPath)
+  }
+  profile <- list(profile)
+  names(profile) <- tfName
+}else{
+  profile <- NULL
+}
+
+if(!is.null(profile)){
+  ggplot(profile[[tfName]], aes(x=rel_pos, y=w))+geom_line()
+}
+```
+
+Determine training and testing data:
+```{r, determine training and testing data}
+trainingContexts <- getContexts(mae, tfName=tfName, which="Both")
+if(length(trainingContexts)>1 & trainModel & params$crossValidate){
+  doCv <- TRUE
+}else{
+  doCv <- FALSE
+}
+saveHdf5 <- TRUE
+```
+
+```{r, get Feature-Matrix, eval=trainModel}
+ptm <- proc.time()
+fm <- getFeatureMatrix(mae, tfName=tfName, 
+                            whichCol="OnlyTrain", 
+                            addLabels=TRUE, 
+                            outDir=outDir,
+                            norm="robust", 
+                            saveHdf5=saveHdf5,
+                            convertInteger=FALSE)
+gc()
+
+if(length(trainingContexts)==1){
+  featMaxs <- DelayedMatrixStats::colMaxs(assays(fm)$features, na.rm=TRUE)
+  featMins <- DelayedMatrixStats::colMins(assays(fm)$features, na.rm=TRUE)
+  minMaxDiff <- featMaxs-featMins
+  featToRemove <- colnames(fm)[which(minMaxDiff==0 | is.na(minMaxDiff))]
+  featToRemove <- setdiff(featToRemove, "context")
+  fm <- fm[,!(colnames(fm) %in% featToRemove)]
+  saveRDS(featToRemove, file.path(outDir, "featsToRemove.rds"))
+}else{
+  featToRemove <- c()
+  saveRDS(featToRemove, file.path(outDir, "featsToRemove.rds"))
+}
+
+print(proc.time()-ptm)
+gc()
+```
+
+```{r, split feature matrix by holdout chromosomes, eval=trainModel}
+rangesFm <- rowRanges(fm)
+rangeDt <- as.data.table(rangesFm)
+rangeDt[,row_id:=1:.N]
+
+holdOutChr <- c("chr2", "chr4", "chr9")
+holdOutInd <- subset(rangeDt, seqnames %in% holdOutChr)$row_id
+holdOutRanges <- rangesFm[holdOutInd]
+
+# subset to autosomes
+trainInd <- subset(rangeDt, seqnames %in% paste0("chr", 1:22))$row_id
+trainInd <- setdiff(trainInd, holdOutInd)
+trainRanges <- rangesFm[trainInd]
+
+fmTrain <- IRanges::subsetByOverlaps(fm, trainRanges, type = "equal")
+fmValChrs <- IRanges::subsetByOverlaps(fm, holdOutRanges, type = "equal")
+gc()
+```
+
+# Cross-validation on Training data
+
+```{r, setup feature importance & performance estimates, eval=trainModel}
+prAll <- data.table()
+featImpAll <- data.table()
+hpAll <- data.table()
+
+featSub <- setdiff(colnames(fm), c(paste(TFBlearner:::SITEFEAT, 
+                                         TFBlearner:::WIDTHFEATNAME, sep="_"),
+                                   TFBlearner:::LABELCOLNAME, 
+                                   "context"))
+featGroups <- unlist(tstrsplit(featSub, split="_", keep=2))
+
+# get the MDS-dimensions and distances
+mdsDims <- colData(mae[["ATAC"]])[,paste(TFBlearner:::MDSDIMFEATNAME, 1:2, sep="_")]
+mdsDist <- as.matrix(dist(mdsDims))
+
+if(nrow(fmValChrs)>nRowPerf){
+  fmValChrsSub <- fmValChrs[sample(1:nrow(fmValChrs), nRowPerf),]  
+}else{
+  fmValChrsSub <- fmValChrs
+}
+assays(fmValChrsSub)$features <- TFBlearner:::.convertToMatrix(assays(fmValChrsSub)$features)
+
+predCols <- c(paste(TFBlearner:::PREDPREFIX, TFBlearner:::MODELNAMES, sep="_"),
+              paste(TFBlearner:::PREDPREFIX, TFBlearner:::MODELSTACKEDSUFFIX, sep="_"),
+              TFBlearner:::CSCORECOLNAME)
+gc()
+```
+
+
+```{r, cross-validation on train, eval=doCv, error=TRUE}
+ptm <- proc.time()
+for(valItContext in trainingContexts){
+  # subset by cellular context
+  fmValIt <- fmTrain[which(rowData(fmTrain)$context==valItContext),]
+  assays(fmValIt)$features <- TFBlearner:::.convertToMatrix(assays(fmValIt)$features)
+  
+  fmTrainIt <- fmTrain[which(rowData(fmTrain)$context!=valItContext),]
+  if(nrow(fmTrainIt)>nRowPerf){
+    fmTrainSubIt <- fmTrainIt[sample(1:nrow(fmTrainIt), nRowPerf),]  
+  }else{
+    fmTrainSubIt <- fmTrainIt
+  }
+  assays(fmTrainSubIt)$features <- TFBlearner:::.convertToMatrix(assays(fmTrainSubIt)$features)
+  fmValChrsSubIt <- fmValChrsSub[which(rowData(fmValChrsSub)$context!=valItContext),]
+  
+  # train tf model 
+  BPPARAM <- SnowParam(workers=4, timeout=7200,
+                      force.GC=TRUE)
+  bpstart(BPPARAM)
+  bplapply(1:4, function(x) {
+         suppressPackageStartupMessages({
+         require(TFBlearner, attach.required=TRUE)
+        })
+        NULL}, BPPARAM = BPPARAM)
+  #BPPARAM <- SerialParam()
+  modsIt <- trainTfModel(tfName=tfName, fmTrainIt, 
+                         measureName="classif.aucpr", 
+                         stackingStrat="wMean",
+                         evalRounds=100, 
+                         earlyStoppingRounds=5,
+                         posFrac=0.25,
+                         loContext=TRUE,
+                         seed=seed,
+                         numThreads=12,
+                         BPPARAM=BPPARAM)
+  bpstop(BPPARAM)
+  gc()
+  
+  # Predict on training data
+  predTrainIt <- predictTfBinding(modsIt, fmTrainSubIt, chunk=NULL, 
+                                  simplified=FALSE, BPPARAM=SerialParam())
+  nonFlankTrainIt <- which(predTrainIt[,TFBlearner:::BINLABELNAME]>=0)
+  predTrainIt <- as.data.table(as.matrix(predTrainIt[nonFlankTrainIt,]))
+  predTrainIt <- cbind(predTrainIt, 
+                       assays(fmTrainSubIt)$features[nonFlankTrainIt, 
+                                                     TFBlearner:::CSCORECOLNAME])
+  setnames(predTrainIt, "V2", TFBlearner:::CSCORECOLNAME)
+  prTrainIt <- lapply(predCols, TFBlearner:::.getPRCurve, 
+                     dt=predTrainIt, 
+                     labels=TFBlearner:::BINLABELNAME, models="context", 
+                     posClass=1, negClass=0, subSample=FALSE, 
+                     aggregate=TRUE, seed=seed)
+  names(prTrainIt) <- predCols
+  prTrainIt <- rbindlist(prTrainIt, idcol="submodel")
+  prTrainIt$pos_frac <- sum(predTrainIt[[TFBlearner:::BINLABELNAME]])/nrow(predTrainIt)
+  prTrainIt$computed_on <- "train_contexts"
+  prTrainIt$dist_to_closest_train <- 0
+  prTrainIt[,context_label:=trainingContexts[context]]
+  gc()
+  
+  # Validation context
+  predValIt <- predictTfBinding(modsIt, fmValIt, chunk=NULL,
+                                simplified=FALSE, BPPARAM=SerialParam())
+  nonFlankValIt <- which(predValIt[,TFBlearner:::BINLABELNAME]>=0)
+  predValIt <- as.data.table(as.matrix(predValIt[nonFlankValIt,]))
+  predValIt <- cbind(predValIt, 
+                     assays(fmValIt)$features[nonFlankValIt, 
+                                              TFBlearner:::CSCORECOLNAME])
+  setnames(predValIt, "V2", TFBlearner:::CSCORECOLNAME)
+  prValIt <- lapply(predCols, TFBlearner:::.getPRCurve, 
+                    dt=predValIt, 
+                    labels=TFBlearner:::BINLABELNAME, models="context", 
+                    posClass=1, negClass=0, subSample=FALSE, 
+                    aggregate=TRUE, seed=seed)
+  names(prValIt) <- predCols
+  prValIt <- rbindlist(prValIt, idcol="submodel")
+  prValIt$pos_frac <- sum(predValIt[[TFBlearner:::BINLABELNAME]])/nrow(predValIt)
+  prValIt$computed_on <- "val_context"
+  prValIt$context_label <- valItContext
+  distToClosest <- min(mdsDist[,valItContext][setdiff(trainingContexts, 
+                                                      valItContext)])
+  prValIt$dist_to_closest_train <- distToClosest
+  gc()
+  
+  # Validation chromosomes
+  predValChrs <- predictTfBinding(modsIt, fmValChrsSubIt, chunk=NULL, 
+                                  simplified=FALSE, BPPARAM=SerialParam())
+  nonFlankValChr <- which(predValChrs[,TFBlearner:::BINLABELNAME]>=0)
+  predValChrs <- as.data.table(as.matrix(predValChrs[nonFlankValChr,]))
+  predValChrs <- cbind(predValChrs, 
+                       assays(fmValChrsSubIt)$features[nonFlankValChr, 
+                                                       TFBlearner:::CSCORECOLNAME])
+  setnames(predValChrs, "V2", TFBlearner:::CSCORECOLNAME)
+  prValChrs <- lapply(predCols, TFBlearner:::.getPRCurve, 
+                      dt=predValChrs, 
+                      labels=TFBlearner:::BINLABELNAME, models="context", 
+                      posClass=1, negClass=0, subSample=FALSE, 
+                      aggregate=TRUE, seed=seed)
+  names(prValChrs) <- predCols
+  prValChrs <- rbindlist(prValChrs, idcol="submodel")
+  prValChrs$pos_frac <- sum(predValChrs[[TFBlearner:::BINLABELNAME]])/nrow(predValChrs)
+  prValChrs$computed_on <- "val_chromosomes"
+  prValChrs[,context_label:=trainingContexts[context]]
+  prValChrs[,dist_to_closest_train:=fifelse(context_label==valItContext,
+                                            distToClosest, 0)]
+  gc()
+
+  # get prediction table
+  prIt <- rbindlist(list(prValChrs, prValIt, prTrainIt), 
+                    use.names=TRUE, fill=TRUE)
+  prIt$trainset <- paste(setdiff(trainingContexts, valItContext), collapse=".")
+  prIt$holdout_set <- valItContext
+  prIt$model <- "leave-out-train-context"
+  prAll <- rbind(prAll, prIt, fill=TRUE, use.names=TRUE)
+  write.table(prAll,
+              file=file.path(outDir, 
+                             paste0(paste("performance", tfName, sep="_"), ".tsv")),
+              quote=FALSE, row.names=FALSE, sep="\t")
+
+  # get feature importances
+  featImpValChr <- TFBvarImp(assays(fmValChrsSubIt)$features[nonFlankValChr,featSub], 
+                             preds=predValChrs, 
+                             mods=modsIt[TFBlearner:::MODELNAMES], 
+                             groups=featGroups, seed=seed)
+  featImpValChr <- featImpValChr$features
+  featImpValChr$computed_on <- "val_chromosomes"
+  featImpValChr$pos_frac <- sum(prValChrs[[TFBlearner:::BINLABELNAME]])/nrow(prValChrs)
+  featImpValCon <- TFBvarImp(assays(fmValIt)$features[nonFlankValIt,featSub], 
+                             predValIt, mods=modsIt[TFBlearner:::MODELNAMES], 
+                             groups=featGroups, seed=seed)
+  featImpValCon <- featImpValCon$features
+  featImpValCon$computed_on <- "val_context"
+  featImpValCon$pos_frac <- sum(predValIt[[TFBlearner:::BINLABELNAME]])/nrow(predValIt)
+  
+  featImpValIt <- rbind(featImpValChr, featImpValCon, use.names=TRUE, fill=TRUE)
+  featImpValIt$trainset <- paste(setdiff(trainingContexts, valItContext), collapse=".")
+  featImpValIt$holdout_set <- valItContext
+  featImpValIt$model <- "leave-out-train-context"
+  featImpAll <- rbind(featImpAll, featImpValIt, fill=TRUE, use.names=TRUE)
+  write.table(featImpAll,
+              file=file.path(outDir, 
+                             paste0(paste("featImp", tfName, sep="_"), ".tsv")),
+              quote=FALSE, row.names=FALSE, sep="\t")
+  
+  # save hyperparameters of model
+  hpDts <- lapply(modsIt[TFBlearner:::MODELNAMES], function(m){
+            params <- m$params[setdiff(names(m$params), 
+                                       c("preselMotif", "preselActMotif", 
+                                         "interaction_constraints", "metric"))]
+            as.data.table(params)})
+  hpDt <- rbindlist(hpDts, idcol="submodel")
+  hpDt$trainset <- paste(setdiff(trainingContexts, valItContext), collapse=".")
+  hpDt$holdout_set <- valItContext
+  hpDt$model <- "leave-out-train-context"
+  hpDt$pos_frac_training <- sum(predTrainIt[[TFBlearner:::BINLABELNAME]])/nrow(predTrainIt)
+  hpAll <- rbind(hpAll, hpDt, use.names=TRUE, fill=TRUE)
+  write.table(hpAll,
+              file=file.path(outDir, 
+                             paste0(paste("hyperParams", tfName, sep="_"), ".tsv")),
+              quote=FALSE, row.names=FALSE, sep="\t")
+  
+  rm(featImpValIt)
+  rm(predValChrs)
+  rm(predValIt)
+  rm(predTrainIt)
+  gc()
+}
+print(proc.time()-ptm)
+```
+
+# Train on Full
+
+```{r, train, eval=trainModel}
+modsFull <- trainTfModel(tfName=tfName, fm, 
+                         measureName="classif.aucpr", 
+                         stackingStrat="wMean",
+                         evalRounds=evalRounds, 
+                         loContext=TRUE,
+                         valChrs=holdOutChr,
+                         earlyStoppingRounds=10,
+                         seed=seed,
+                         numThreads=12,
+                         BPPARAM=SerialParam())
+modelPath <- file.path(outDir, paste0(paste("model", tfName, sep="_"), ".txt"))
+file.remove(modelPath)
+saveModels(modsFull, filePath=modelPath)
+
+# save selected motifs
+preActMotifs <- as.data.table(modsFull$all_pos$params$preselActMotif, 
+                              keep.rownames=TRUE)
+colnames(preActMotifs) <- c("motif_class", "motif_name")
+preActMotifs[,rank:=tstrsplit(motif_class, split="_", keep=2, type.convert=TRUE)]
+preActMotifs$type <- "activity_associated_motifs"
+preActMotifs$feat <- "assocationMotifActivity"
+
+preMatchMotifs <- as.data.table(modsFull$all_pos$params$preselMotif, 
+                                keep.rownames=TRUE)
+colnames(preMatchMotifs) <- c("motif_class", "motif_name")
+preMatchMotifs[,rank:=tstrsplit(motif_class, split="_", keep=2, type.convert=TRUE)]
+preMatchMotifs$type <- "binding_associated_motifs"
+preMatchMotifs$feat <- "motifMatch"
+
+preMotifs <- rbind(preMatchMotifs, preActMotifs, use.names=TRUE, fill=TRUE)
+preMotifs$tfName <- tfName
+write.table(preMotifs,
+            file=file.path(outDir, 
+                           paste0(paste("selMotifs", tfName, sep="_"), ".tsv")),
+            quote=FALSE, row.names=FALSE, sep="\t")
+```
+
+```{r, feature importance on holdout chromosomes, eval=trainModel}
+predValChrs <- predictTfBinding(modsFull, fmValChrsSub, chunk=NULL, 
+                                simplified=FALSE, BPPARAM=SerialParam())
+nonFlankValChr <- which(predValChrs[,TFBlearner:::BINLABELNAME]>=0)
+predValChrs <- as.data.table(as.matrix(predValChrs[nonFlankValChr,]))
+predValChrs <- cbind(predValChrs, 
+                     assays(fmValChrsSub)$features[nonFlankValChr, 
+                                                   TFBlearner:::CSCORECOLNAME])
+setnames(predValChrs, "V2", TFBlearner:::CSCORECOLNAME)
+prFullValChrs <- lapply(predCols, TFBlearner:::.getPRCurve, 
+                        dt=predValChrs, 
+                        labels=TFBlearner:::BINLABELNAME, models="context", 
+                        posClass=1, negClass=0, subSample=FALSE, 
+                        aggregate=TRUE, seed=seed)
+names(prFullValChrs) <- predCols
+prFullValChrs <- rbindlist(prFullValChrs, idcol="submodel")
+prFullValChrs$computed_on <- "val_chromosomes"
+prFullValChrs[,context_label:=trainingContexts[context]]
+prFullValChrs[,dist_to_closest_train:=0]
+prFullValChrs$trainset <- paste(trainingContexts, collapse=".")
+prFullValChrs$holdout_set <- NULL
+prFullValChrs$model <- "full_model"
+prFullValChrs$pos_frac <- sum(predValChrs[[TFBlearner:::BINLABELNAME]])/nrow(predValChrs)
+prAll <- rbind(prAll, prFullValChrs, fill=TRUE, use.names=TRUE)
+
+prAll[,set:=fifelse(model=="full_model",
+                    "final-model: validation chromosomes", 
+                    "cv-model")]
+prAll[,set:=fifelse(model=="leave-out-train-context" & 
+                    computed_on=="val_chromosomes",
+                    "cv-model: validation chromosomes", 
+                    set)]
+prAll[,set:=fifelse(model=="leave-out-train-context" & 
+                    computed_on=="val_context",
+                    "cv-model: validation context", 
+                    set)]
+prAll[,set:=fifelse(model=="leave-out-train-context" & 
+                    computed_on=="train_contexts",
+                    "cv-model: training context", 
+                    set)]
+write.table(prAll,
+            file=file.path(outDir, 
+                          paste0(paste("performance", tfName, sep="_"), ".tsv")),
+            quote=FALSE, row.names=FALSE, sep="\t")
+
+# feature importance
+featImpFull <- TFBvarImp(assays(fmValChrsSub)$features[nonFlankValChr,featSub], 
+                         predValChrs, mods=modsFull[TFBlearner:::MODELNAMES], 
+                         groups=featGroups, seed=seed)
+featImpFull <- featImpFull$features
+featImpFull$computed_on <- "val_chromosomes"
+featImpFull$trainset <- paste(trainingContexts, collapse=".")
+featImpFull$holdout_set <- NULL
+featImpFull$model <- "full_model"
+featImpFull$pos_frac <- sum(predValChrs[[TFBlearner:::BINLABELNAME]])/nrow(predValChrs)
+
+featImpAll <- rbind(featImpAll, featImpFull, fill=TRUE, use.names=TRUE)
+featImpAll[,set:=fifelse(model=="full_model",
+                         "final-model: validation chromosomes", 
+                         "cv-model")]
+featImpAll[,set:=fifelse(model=="leave-out-train-context" & 
+                         computed_on=="val_chromosomes",
+                         "cv-model: validation chromosomes", 
+                         set)]
+featImpAll[,set:=fifelse(model=="leave-out-train-context" & 
+                         computed_on=="val_context",
+                         "cv-model: validation context", 
+                         set)]
+write.table(featImpAll,
+            file=file.path(outDir, 
+                           paste0(paste("featImp", tfName, sep="_"), ".tsv")),
+            quote=FALSE, row.names=FALSE, sep="\t")
+
+# hyperparameters
+hpDts <- lapply(modsFull[TFBlearner:::MODELNAMES], function(m){
+                params <- m$params[setdiff(names(m$params), 
+                                   c("preselMotif", "preselActMotif", 
+                                     "interaction_constraints", "metric"))]
+                as.data.table(params)})
+hpDt <- rbindlist(hpDts, idcol="submodel")
+hpDt$trainset <- paste(trainingContexts, collapse=".")
+hpDt$holdout_set <- NULL
+hpDt$model <- "full_model"
+hpDt$pos_frac <- sum(predValChrs[[TFBlearner:::BINLABELNAME]])/nrow(predValChrs)
+hpAll <- rbind(hpAll, hpDt, use.names=TRUE, fill=TRUE)
+write.table(hpAll,
+            file=file.path(outDir, 
+                          paste0(paste("hyperParams", tfName, sep="_"), ".tsv")),
+            quote=FALSE, row.names=FALSE, sep="\t")
+
+rm(hpAll)
+rm(featImpAll)
+rm(featImpFull)
+rm(prFullValChrs)
+rm(prAll)
+rm(fmValChrsSub)
+rm(fmValChrs)
+rm(fmTrain)
+rm(fm)
+gc()
+```
+
+```{r, clean up, eval=saveHdf5, error=TRUE}
+# delete feature matrix from disk if saveHdf5 = TRUE
+file.remove(file.path(outDir, paste0(paste("feature_matrix", tfName, sep="_"), ".h5")))
+```
+
+
+```{r, sessionInfo}
+print(proc.time()-ptmStart)
+print(Sys.time())
+```

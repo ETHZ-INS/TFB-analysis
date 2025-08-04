@@ -1,0 +1,187 @@
+---
+title: "03.3 Feature construction"
+output: html_document
+date: '2025-21-01'
+params: 
+  tfName: 
+    label: "tfName"
+    value: ATF2
+  cofactors:
+    label: "cofactors"
+    value: ATF3
+  predContext:
+    label: "predContext"
+    value: !r c("A549")
+  maePath:
+    label: "maePath"
+    value: mae
+  profilesPath:
+    label: "profilesPath"
+    value: "./profiles/ATF2_profile.tsv"
+  outDir: 
+    label: "outDir"
+    value: "./out"
+  modelPath:
+    label: "modelPath"
+    value: ""
+  seed:
+    label: "seed"
+    value: 42
+  crossValidate:
+    label: "crossValidate"
+    value: TRUE
+---
+
+```{r, setup}
+suppressPackageStartupMessages({
+  library(BSgenome.Hsapiens.UCSC.hg38)
+  library(TFBlearner)
+  library(data.table)
+  library(BiocParallel)
+  library(R.utils)
+  library(ggplot2)
+  source("utils.R") # feature importance
+})
+print(Sys.time())
+ptmStart <- proc.time()
+```
+
+## Parameters
+
+```{r, parameters}
+seed <- params$seed
+set.seed(seed)
+
+numThreads <- min(16, getDTthreads())
+setDTthreads(numThreads)
+RcppML::setRcppMLthreads(numThreads)
+evalRounds <- 100
+nRowPerf <- 1e6
+
+tfName <- params$tfName
+profilesPath <- params$profilesPath
+modelPath <- params$modelPath
+predContexts <- params$predContext
+holdOutChr <- c("chr2", "chr4", "chr9")
+print(predContexts)
+
+if(file.exists(modelPath)){
+  modsFull <- loadModels(modelPath)
+  trainModel <- FALSE
+}else{
+  trainModel <- TRUE
+}
+
+outDir <- params$outDir
+if(!dir.exists(outDir)) dir.create(outDir)
+print(proc.time())
+```
+
+# Load inputs
+
+```{r, prepare meta data}
+mae <- readRDS(params$maePath)
+
+coords <- rowRanges(experiments(mae)[["ChIP"]])
+
+tfCofactors <- params$cofactors
+tfCofactors <- unique(tfCofactors)
+tfCofactors
+
+if(file.exists(profilesPath)){
+  if(grepl(".tsv", profilesPath)){
+    profile <- fread(profilesPath)
+  }
+  else{
+    profile <- readRDS(profilesPath)
+  }
+  profile <- list(profile)
+  names(profile) <- tfName
+}else{
+  profile <- NULL
+}
+
+if(!is.null(profile)){
+  ggplot(profile[[tfName]], aes(x=rel_pos, y=w))+geom_line()
+}
+```
+
+Determine training and testing data:
+```{r, determine training and testing data}
+smp <- as.data.table(sampleMap(mae))
+smp[assay %in% c("ATAC", "ATAC.Promoters", "chromVAR.Activity") & 
+    primary %in% predContexts,]$isTesting <- FALSE
+sampleMap(mae) <- smp
+
+cols <- lapply(experiments(mae), function(n) {
+        colnames(n)[colnames(n) %in% unique(subset(sampleMap(mae), 
+             !isTesting)$colname)]})
+mae <- subsetByColumn(mae, cols)
+
+trainingContexts <- getContexts(mae, tfName=tfName, which="Both")
+if(length(trainingContexts)>1 & trainModel & params$crossValidate){
+  doCv <- TRUE
+}else{
+  doCv <- FALSE
+}
+saveHdf5 <- TRUE
+```
+
+# TF-Features
+
+```{r, tf-specific features}
+ptm <- proc.time()
+mae <- tfFeatures(mae,
+                  tfName=tfName,
+                  tfCofactors=tfCofactors,
+                  nPatterns=40,
+                  nMotifs=5,
+                  seed=seed)
+print(proc.time()-ptm)
+gc()
+```
+
+# Context-TF-Features
+
+```{r, context-tf-features, eval=trainModel}
+ptm <- proc.time()
+if(is.null(profile)){
+  # compute insertion profile here
+  motifPath <- subset(colData(mae[[TFBlearner:::MOTIFEXP]]), 
+                      get(TFBlearner:::MOTIFNAMECOL)==tfName)$origin
+  baseDir <- metadata(colData(mae[[TFBlearner:::MOTIFEXP]]))[[TFBlearner:::BASEDIRCOL]]
+  motifRanges <- readRDS(file.path(baseDir, motifPath))
+  
+  atacFragFilePaths <- unlist(subset(colData(mae[[TFBlearner:::ATACEXP]]),
+                                     context %in% trainingContexts)$origin)
+  baseDir <- metadata(colData(mae[[TFBlearner:::ATACEXP]]))[[TFBlearner:::BASEDIRCOL]]
+  atacFragPaths <- file.path(baseDir, atacFragFilePaths)
+  names(atacFragPaths) <- names(atacFragFilePaths)
+  
+  ins <- getInsertionProfiles(atacFragPaths, motifRanges)
+  profile <- list(ins$insertProfiles)
+  names(profile) <- tfName
+  saveRDS(profile, file.path(outDir, "profile.rds"))
+}
+
+conTFfeatures <- c("Inserts", "Weighted_Inserts", "ChromVAR_Scores")
+if(length(trainingContexts)==1){
+  conTFfeatures <- setdiff(conTFfeatures, "ChromVAR_Scores")
+}
+
+mae <- contextTfFeatures(mae, tfName=tfName, 
+                         whichCol="OnlyTrain",
+                         features=conTFfeatures,
+                         addLabels=TRUE, 
+                         seed=seed,
+                         profiles=profile)
+gc()
+mae <- saveRDS(mae, file.path(outDir, "05_mae_conTfFeat_sub.rds"))
+print(proc.time()-ptm)
+gc()
+```
+
+```{r, sessionInfo}
+print(proc.time()-ptmStart)
+print(Sys.time())
+```

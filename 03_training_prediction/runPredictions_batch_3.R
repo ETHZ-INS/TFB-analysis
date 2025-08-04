@@ -6,7 +6,7 @@ seed <- 43
 metaData <- readRDS("data/01_maeAll_meta.rds")
 metaData <- subset(metaData, is_matched)
 metaAg <- metaData[,.(n_con=length(unique(full_id))), by=tf_name]
-tfNamesBatch <- unique(subset(metaAg, n_con>=3)$tf_name)
+tfNamesBatch <- setdiff(unique(subset(metaAg, n_con>=3)$tf_name), "CTCF")
 
 outBaseDir <- "data/predictions"
 cofactors <- readRDS("data/meta_data/topInteractors.rds")

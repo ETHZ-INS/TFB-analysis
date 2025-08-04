@@ -1,102 +1,263 @@
 ---
 title: "04.1 Model component ablations"
 output: html_document
-date: '2025-24-01'
 ---
 
 ```{r, setup}
 suppressPackageStartupMessages({
-library(TfBindingMultiAssay)
+library(BiocParallel)
 library(phastCons100way.UCSC.hg38)
 library(BSgenome.Hsapiens.UCSC.hg38)
 library(EnsDb.Hsapiens.v86)
 library(TFBlearner)
+library(ggplot2)
 library(gam)})
 
-set.seed(42)
+seed <- 42 # params$seed
+set.seed(seed)
 ```
 
-```{r, paths}
-mae <- readRDS("../03_training/mae_small/mae_small_hdf5.rds")
-mae <- mae[,colnames(mae) %in% unique(subset(sampleMap(mae), is_training)$colname),]
-
-fpPath <- "../data/consensus_footprints_and_collapsed_motifs_hg38.bed"
-embDir <- "/mnt/germain/plger/dhs_seq_dr/new/embedding.rds"
-cofactorMap <- readRDS("../data/cofactorMaps.rds")
+```{r, setup data}
+selectedTfs <- c("ATF3", "NR3C1", "MEF2C", "MYC", "ZNF143", "MAX", "JUN", "SOX6")
+holdOutChr <- c("chr2", "chr4", "chr9")
 ```
 
-```{r}
-selectedTfs <- c("JUN", "CTCF", "ATF3", "MYOG", "MYC", "ZNF143", "MAX")
+```{r, inputs}
+mae <- readRDS("../data/04_maeAll_conFeat_sub.rds") 
+cofactors <- readRDS("../data/meta_data/topInteractors.rds")
+outDir <- "."
 ```
 
-```{r}
-fpData <- fread(fpPath, select=c(1:3,5), 
-                col.names=c("chr", "start", "end", "mean_signal"))
-emb <- readRDS(embDir)
-colnames(emb) <- paste("Embed", 1:ncol(emb), sep="_")
-embDts <- lapply(colnames(emb), function(col){
-  embDt <- as.data.table(emb[,col], keep.rownames=TRUE)
-  setnames(embDt, "V2", "score")
-  embDt[,c("chr", "coord"):=tstrsplit(V1, split=":")]
-  embDt[,c("start", "end"):=tstrsplit(coord, split="-", type.convert=TRUE)]
-  embDt$V1 <- NULL
-  embDt
-  })
-names(embDts) <- colnames(emb)
-annoData <- append(embDts, list("footprint_score"=fpData))
-mae <- siteFeatures(mae, annoData=annoData, 
-                    scoreCols=c(rep("score", length(embDts)), "mean_signal"))
+```{r, remove test data}
+cols <- lapply(experiments(mae), function(n) {
+        colnames(n)[colnames(n) %in% unique(subset(sampleMap(mae), 
+             !isTesting)$colname)]})
+mae <- subsetByColumn(mae, cols)
+```
 
+```{r, define paramgrid}
+paramGrid <- data.table(tuneHyperparams=c(FALSE,TRUE,TRUE,TRUE,TRUE),
+                        loContext=c(TRUE,FALSE,FALSE,TRUE,TRUE),
+                        measure=c("classif.logloss",  # does not matter
+                                  "classif.logloss", 
+                                  "classif.aucpr",
+                                  "classif.logloss",
+                                  "classif.aucpr"))
+paramGrid <- paramGrid[nrow(paramGrid):1,]
+
+predCols <- c(paste(TFBlearner:::PREDPREFIX, TFBlearner:::MODELNAMES, sep="_"),
+              paste(TFBlearner:::PREDPREFIX, TFBlearner:::MODELSTACKEDSUFFIX, sep="_"))
+```
+
+```{r, ablation rounds}
+auprAllDt <- data.table()
+hpAllDt <- data.table()
 for(tf in selectedTfs){
-  tfCofactors <- unique(subset(cofactorMap, tf_train==tf)$tf_train_cofactor)
-  mae <- tfFeatures(mae, tfName=tf, tfCofactors=tfCofactors)
-  contexts <- getContexts(mae, tfName=tf)
+  contexts <- getContexts(mae, tfName=tf, which="Both")
+  tfCofactors <- unique(cofactors[[tf]])
   
+  experiments(mae)$tfFeat <- NULL
+  experiments(mae)$contextTfFeat <- NULL
+  
+  # Compute the tf-specific features
+  mae <- tfFeatures(mae, 
+                    tfName=tf,
+                    tfCofactors=tfCofactors,
+                    nPatterns=40,
+                    nMotifs=10,
+                    seed=seed)
+  
+  profile <- NULL
+  mae <- contextTfFeatures(mae, tfName=tf, 
+                           whichCol="OnlyTrain",
+                           features=c("Inserts", 
+                                      "Weighted_Inserts", 
+                                      "ChromVAR_Scores"),
+                           addLabels=TRUE, 
+                           seed=seed,
+                           profiles=profile)
+  
+  saveHdf5 <- fifelse(length(contexts)>1, TRUE, FALSE)
+  fm <- getFeatureMatrix(mae, tfName=tf, 
+                         addLabels=TRUE, 
+                         whichCol="OnlyTrain", 
+                         norm="robust", 
+                         convertInteger=FALSE,
+                         saveHdf5=saveHdf5)
+
+  rangesFm <- rowRanges(fm)
+  rangeDt <- as.data.table(rangesFm)
+  rangeDt[,row_id:=1:.N]
+
+  holdOutInd <- subset(rangeDt, seqnames %in% holdOutChr)$row_id
+  holdOutRanges <- rangesFm[holdOutInd]
+
+  # subset to autosomes
+  trainInd <- subset(rangeDt, seqnames %in% paste0("chr", 1:22))$row_id
+  trainInd <- setdiff(trainInd, holdOutInd)
+  trainRanges <- rangesFm[trainInd]
+
+  fmTrain <- IRanges::subsetByOverlaps(fm, trainRanges, type = "equal")
+  fmValChrs <- IRanges::subsetByOverlaps(fm, holdOutRanges, type = "equal")
+  
+  if(nrow(fmValChrs)>4e6){
+    fmValChrs <- fmValChrs[sample(1:nrow(fmValChrs), 4e6),]  
+  }else{
+    fmValChrs <- fmValChrs
+  }
+  assays(fmValChrs)$features <- TFBlearner:::.convertToMatrix(assays(fmValChrs)$features)
+  
+  # CV-Rounds (leave-one-context-out)
   for(context in contexts){
-    # Discuss: This is very strict and could also be done in a one-pass with whichCol="All") (just the chromVAR scores are then computed across training and testing ATAC-seq data but no testing labels are ever uses)
-    maeTrain <- contextTfFeatures(mae, tfName=tf, addLabels=TRUE, whichCol="OnlyTrain")
-    fmTrain <- getFeatureMatrix(maeTrain, tfName=tf, addLabels=TRUE, whichCol="OnlyTrain")
+    # subset feature matrix
+    fmValIt <- fmTrain[which(rowData(fmTrain)$context==context),]
+    fmValChrsIt <- fmValChrs[which(rowData(fmValChrs)$context!=context),]
+    assays(fmValIt)$features <- TFBlearner:::.convertToMatrix(assays(fmValIt)$features)
+    fmTrainIt <- fmTrain[which(rowData(fmTrain)$context!=context),]
     
-    maeAll <- contextTfFeatures(mae, tfName=tf, addLabels=TRUE, whichCol="All") # here which col so that chromVAR is computed across all cols => maybe explicitly specificy that chromVAR ATAC is always only calculated on the train data?
-    fmVal <- getFeatureMatrix(maeAll, tfName=tf, addLabels=TRUE, whichCol="Col",
-                              colSel=context)
-    # train bagged model
-    modBag <- trainBagged(modBag, )
-    modNoHpBag <- trainBagged()
-    modLoConBag <- trainBagged()
-    mods <- c(modBag, modNoHpBag, modLoConBag)
-    names(mods) <- c("Bagging-default-hyperparameter selection", 
-                     "Bagging-leave-one-context-out-hyperparameter selection",
-                     "Bagging-no-hyperarameter-selection")
-    
-    auprDts <- lapply(mods, function(mod){
-          predsBag <- predictTfBindingBagged(mod, fmVal)
-          modSingleUnweighted <- trainStacked(fm, modBag, 
-                                              stackingStrat="last",
-                                              numThreads=4)
-          modSingleWeighted <- trainStacked(fm, modBag,
-                                            stackingStrat="wLast",
-                                            numThreads=40)
-          modStackedWMean <- trainStacked(fm, modBag,
-                                          stackingStrat="wMean",
-                                          subSample=1e5,
-                                          numThreads=40)
-          modStackedBoostTree <- trainStacked(fm, modBag,
-                                              stackingStrat="boostTree",
-                                              evalRounds=1,
-                                              numThreads=40)
-          predsStacked <- predictTfBindingStacked(modStack, fm, predsBag)
+    # ablate components of model
+    for(i in 1:nrow(paramGrid)){
+          trainParams <- paramGrid[i,]
           
-          # get area under the curves
-          TFBlearner::.getRocs()
-          auprDt <- data.table()
-    })
-    names(auprDts) <- names(mods) 
-    auprDt <- rbindlist(auprDts, idcol="training_strategy")
-    auprDt$tf <- tf
-    auprDt$context <- context
-    auprAllDt <- rbind(auprAllDt, auprDt)
-    saveRDS(auprAllDt, "auprModelCompDt.rds")
+          ptm <- proc.time()
+          BPPARAM <- SnowParam(workers=4, timeout=7200,
+                     force.GC=TRUE, log=TRUE,logdir=".")
+          bpstart(BPPARAM)
+          bplapply(1:4, function(x) {
+            suppressPackageStartupMessages({
+            require(TFBlearner, attach.required=TRUE)
+            })
+          NULL}, BPPARAM = BPPARAM)
+          mods <- trainTfModel(tfName=tf,
+                               fm=fmTrainIt,
+                               measureName=trainParams$measure[1],
+                               evalRounds=100,
+                               earlyStoppingRounds=5,
+                               tuneHyperparams=trainParams$tuneHyperparams[1],
+                               loContext=trainParams$loContext[1],
+                               stackingStrat="wMean", 
+                               seed=seed,
+                               BPPARAM=BPPARAM)
+          bpstop(BPPARAM)
+          gc()
+          ptm2 <- proc.time()
+          
+          # Predict on training data
+          predsValCon <- predictTfBinding(mods, fmValIt, chunk=NULL, 
+                                          simplified=FALSE, 
+                                          BPPARAM=SerialParam())
+          predsValCon <- as.data.table(as.matrix(predsValCon[predsValCon[,TFBlearner:::BINLABELNAME]>=0,]))
+          prVal <- lapply(predCols, TFBlearner:::.getPRCurve, 
+                          dt=predsValCon, 
+                          labels=TFBlearner:::BINLABELNAME, models="context", 
+                          posClass=1, negClass=0, subSample=FALSE, 
+                          aggregate=TRUE, seed=seed)
+          names(prVal) <- predCols
+          prVal <- rbindlist(prVal, idcol="submodel")
+          prVal$tfName <- tf
+          prVal$pos_frac <- sum(predsValCon[[TFBlearner:::BINLABELNAME]])/nrow(predsValCon)
+          prVal$computed <- "val_context"
+          prVal$holdout_context <- context
+          prVal$training_context <- paste(setdiff(contexts, context), collapse=".")
+          
+          # predict also for validation chromosomes
+          predsValChr <- predictTfBinding(mods, fmValChrsIt, chunk=NULL, 
+                                          simplified=FALSE, 
+                                          BPPARAM=SerialParam())
+          predsValChr <- as.data.table(as.matrix(predsValChr[predsValChr[,TFBlearner:::BINLABELNAME]>=0,]))
+          prValChr <- lapply(predCols, TFBlearner:::.getPRCurve, 
+                             dt=predsValChr, 
+                             labels=TFBlearner:::BINLABELNAME, models="context", 
+                             posClass=1, negClass=0, subSample=FALSE, 
+                             aggregate=TRUE, seed=seed)
+          names(prValChr) <- predCols
+          prValChr <- rbindlist(prValChr, idcol="submodel")
+          prValChr$tfName <- tf
+          prValChr$pos_frac <- sum(predsValChr[[TFBlearner:::BINLABELNAME]])/nrow(predsValChr)
+          prValChr$computed <- "val_chromosomes"
+          prValChr$holdout_context <- context
+          prValChr$training_context <- paste(setdiff(contexts, context), collapse=".")
+          
+          # bind iteration results and save
+          auprDt <- rbind(prVal, prValChr, use.names=TRUE, fill=TRUE)
+          auprDt$tuneHyperparams <- trainParams$tuneHyperparams[[1]]
+          auprDt$loContext <- trainParams$loContext[[1]]
+          auprDt$measure <- trainParams$measure[[1]]
+          auprDt$elapsed <- (ptm2-ptm)[[3]]
+          auprAllDt <- rbind(auprAllDt, auprDt, use.names=TRUE, fill=TRUE)
+          write.table(auprAllDt, file=file.path(outDir, "performance_component_ablation.tsv"),
+                      quote=FALSE, row.names=FALSE, sep="\t")
+          
+          hpDts <- lapply(mods[TFBlearner:::MODELNAMES], function(m){
+            params <- m$params[setdiff(names(m$params), 
+                                       c("preselMotif", "preselActMotif", 
+                                         "interaction_constraints", "metric"))]
+            as.data.table(params)})
+          hpDt <- rbindlist(hpDts, idcol="submodel")
+          hpDt$tuneHyperparams <- trainParams$tuneHyperparams[[1]]
+          hpDt$loContext <- trainParams$loContext[[1]]
+          hpDt$measure <- trainParams$measure[[1]]
+          hpDt$elapsed <- (ptm2-ptm)[[3]]
+          hpAllDt <- rbind(hpAllDt, hpDt, use.names=TRUE, fill=TRUE)
+          write.table(hpAllDt, file=file.path(outDir, "hyperparameters_component_ablation.tsv"),
+                      quote=FALSE, row.names=FALSE, sep="\t")
+    }
   }
 }
+```
+
+```{r, performance plots}
+library(viridis)
+auprAggDt <- auprAllDt[,.(aucpr_mean=mean(auc_pr_mod),
+                          aucpr_median=median(auc_pr_mod)), 
+                        by=.(tuneHyperparams, 
+                             loContext, 
+                             measure, 
+                             tfName, 
+                             computed,
+                             submodel)]
+auprAggDt <- subset(auprAggDt, submodel %in% c("pred_stacked", 
+                                               "pred_all_weighted_pos",
+                                               "pred_all_pos"))
+auprAggDt[,submodel:=fifelse(submodel=="pred_all_pos", "unweighted", submodel)]
+auprAggDt[,submodel:=fifelse(submodel=="pred_all_weighted_pos", "weighted", submodel)]
+auprAggDt[,submodel:=fifelse(submodel=="pred_stacked", "stacked", submodel)]
+
+ggplot(auprAggDt, aes(x=tfName,y=interaction(tuneHyperparams, 
+                                              loContext, 
+                                              measure), 
+                      fill=aucpr_median))+
+  geom_tile()+
+  geom_text(aes(label=round(aucpr_median,2)), color="white")+
+  scale_fill_viridis(option="A")+
+  facet_grid(cols=vars(computed), rows=vars(submodel))+
+  theme_bw()
+
+ggplot(auprAggDt, aes(x=tfName,y=interaction(tuneHyperparams, 
+                                              loContext, 
+                                              measure), 
+                      fill=aucpr_mean))+
+  geom_tile()+
+  geom_text(aes(label=round(aucpr_median,2)), color="white")+
+  scale_fill_viridis(option="A")+
+  facet_grid(cols=vars(computed), rows=vars(submodel))+
+  theme_bw()
+```
+
+```{r, save best combination}
+auprAggDt <- auprAllDt[,.(aucpr_mean=mean(auc_pr_mod),
+                          aucpr_median=median(auc_pr_mod)), 
+                        by=.(tuneHyperparams, 
+                             loContext, 
+                             measure, 
+                             computed,
+                             submodel)]
+auprAggDt <- subset(auprAggDt, computed=="val_context" & submodel=="pred_stacked")
+bestComb <- head(setorder(auprAggDt, -aucpr_mean), 1)
+write.table(bestComb, file=file.path(outDir, "best_component_combination.tsv"),
+            quote=FALSE, row.names=FALSE, sep="\t")
+```
+
+```{r}
+sessionInfo()
 ```

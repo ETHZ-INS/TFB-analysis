@@ -3,8 +3,14 @@ title: "02.1 Reformatting ChIP-peaks"
 output: html_document
 date: "2025-21-01"
 params: 
-  outDir: 
-    label: "outDir"
+  metaDataPath: 
+    label: metaDataPath
+    value: "meta.tsv"
+  outDirMeta:
+    label: "outDirMeta"
+    value: ./outDir
+  outDirChIP: 
+    label: "outDirChIP"
     value: ./outDir
 ---
 
@@ -14,8 +20,10 @@ library(data.table)
 
 Import metadata:
 ```{r}
-metaData <- readRDS("../data/meta_data/fullMetaAll.rds")
-outDir <- params$outDir
+metaData <- readRDS(params$metaDataPath)
+outDir <- params$outDirChIP
+outDirMeta <- params$outDirMeta
+
 metaChIP <- unique(metaData, by=c("chip_paths"))
 metaChIP <- subset(metaChIP, !is.na(caller))
 
@@ -137,9 +145,9 @@ metaData[,chip_path_re:=fifelse(is.na(chip_paths), NA, chip_path_re)]
 metaData <- subset(metaData,!(chip_paths %in% missed))
 metaChIP <- subset(metaChIP,!(chip_paths %in% missed))
 
-saveRDS(metaChIP, "../data/meta_data/01_fullMetaChIPAll.rds")
-saveRDS(metaData, "../data/meta_data/01_fullReMetaAll.rds")
-saveRDS(missed, "../data/meta_data/sortedOutChIPs.rds")
+saveRDS(metaChIP, file.path(outDirMeta, "02_fullMetaChIPAll.rds"))
+saveRDS(metaData, file.path(outDirMeta, "02_fullReMetaAll.rds"))
+saveRDS(missed, file.path(outDirMeta, "sortedOutChIPs.rds"))
 ```
 
 ```{r, sessioninfo}

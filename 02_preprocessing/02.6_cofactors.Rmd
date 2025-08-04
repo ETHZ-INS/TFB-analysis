@@ -1,7 +1,13 @@
 ---
 title: "02.6 Cofactors"
 output: html_document
-date: '2025-21-01'
+params:
+  outDir: 
+    label: "outDir"
+    value: ./outDir
+  tfListpath:
+    label: "tfListpath"
+    value: tfListpath.rds
 ---
 
 ```{r, setup}
@@ -13,7 +19,8 @@ suppressPackageStartupMessages({
 ```
 
 ```{r}
-allTfs <- readRDS("../data/allTfs.rds")
+outDir <- params$outDir
+allTfs <- readRDS(params$tfListpath)
 
 library(OmnipathR)
 library(tidyr)
@@ -45,7 +52,7 @@ cofactors <- rbind(cofactors1[,c("tf_train", "tf_train_cofactor")],
                    cofactors2[,c("tf_train", "tf_train_cofactor")])
 cofactors <- unique(cofactors, by=c("tf_train", "tf_train_cofactor"))
 setnames(cofactors, c("tf_train", "tf_train_cofactor"), c("tf", "tf_cofactor"))
-write.table(cofactors, "../data/cofactorMaps.tsv", sep="\t", 
+write.table(cofactors, file.path(outDir, "cofactorMaps.tsv"), sep="\t", 
             col.names=TRUE, row.names=FALSE, quote=FALSE)
 ```
 

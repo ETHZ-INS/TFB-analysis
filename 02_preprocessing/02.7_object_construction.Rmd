@@ -1,11 +1,37 @@
 ---
 title: "02.7 Object construction"
 output: html_document
-date: '2025-21-01'
 params: 
   motifDir: 
     label: "motifDir"
     value: ./motifs
+  refCoordsPath:
+    label: "refCoordsPath"
+    value: "refCoords.rds"
+  metaTrainPath:
+    label: "metaTrainPath"
+    value: "metaTrainPath.tsv"
+  metaChIPTrainPath:
+    label: "metaChIPTrainPath"
+    value: "metaChIPTrainPath.tsv"
+  metaTestPath:
+    label: "metaTestPath"
+    value: "metaTestPath.tsv"
+  metaChIPTestPath:
+    label: "metaChIPTestPath"
+    value: "metaChIPTestPath.tsv"
+  tfsListPath:
+    label: "tfsListPath"
+    value: "tfsListPath.tsv"
+  cofactorMapPath:
+    label: "cofactorMapPath"
+    value: "cofactorMaps.tsv"
+  metaDir:
+    label: "metaDir"
+    value: ./metaDir
+  outDir:
+    label: "outDir"
+    value: ./outDir
 ---
 
 ```{r, setup}
@@ -26,6 +52,7 @@ set.seed(seed)
 
 ```{r, params}
 motifDir <- params$motifDir
+outDir <- params$outDir
 ```
 
 ## Prepare Data
@@ -33,39 +60,116 @@ motifDir <- params$motifDir
 ### Meta data
 ```{r, prepare meta data}
 # read all ATAC data & label test data
-trainMetaAll <- readRDS("../data/meta_data/02_trainMetaAll.rds")
-testMetaAll <- readRDS("../data/meta_data/02_testMetaAll.rds")
+trainMetaAll <- readRDS(params$metaTrainPath)
+testMetaAll <- readRDS(params$metaTestPath)
 
-trainMetaChIP <- readRDS("../data/meta_data/03_trainMetaChIPAll.rds")
+trainMetaChIP <- readRDS(params$metaChIPTrainPath)
 trainMetaChIP <- unique(trainMetaChIP, by="file_path")
-trainMetaChIP[,full_id:=cellular_context_id]
+trainMetaChIP[,full_id:=as.character(cellular_context_id)]
+trainMetaChIP[,cellular_context_id:=as.integer(cellular_context_id)]
+trainMetaChIP <- merge(trainMetaChIP, 
+                       unique(trainMetaAll[,c("context_id", "context")], 
+                              by="context_id"), 
+                       by.x=c("cellular_context_id"),
+                       by.y=c("context_id"), all.x=TRUE, all.y=FALSE)
 
-testMetaChIP <- readRDS("../data/meta_data/03_testMetaChIPAll.rds")
-testMetaChIP[,full_id:=cellular_context_id]
+testMetaChIP <- readRDS(params$metaChIPTestPath)
+testMetaChIP[,full_id:=as.character(cellular_context_id)]
+testMetaChIP[,cellular_context_id:=as.integer(cellular_context_id)]
+testMetaChIP <- merge(testMetaChIP, 
+                       unique(testMetaAll[,c("context_id", "context")], 
+                              by="context_id"), 
+                       by.x=c("cellular_context_id"),
+                       by.y=c("context_id"), all.x=TRUE, all.y=FALSE)
 
-trainMetaAtac <- subset(trainMetaAll, !is.na(atac_path))
+trainMetaAtac <- subset(trainMetaAll, is_matched & !is.na(atac_path))
 trainMetaAtac <- unique(trainMetaAtac, by="atac_path")
-trainMetaAtac[,full_id:=context_id]
-#trainMetaAtac <- subset(trainMetaAtac, context!="Glutamatergic_Neuron")
+trainMetaAtac[,full_id:=as.character(context_id)]
 
-testMetaAtac <- subset(testMetaAll, !is.na(atac_path))
+testMetaAtac <- subset(testMetaAll, is_matched & !is.na(atac_path))
 testMetaAtac <- unique(testMetaAtac, by="atac_path")
-testMetaAtac[,full_id:=context_id]
+testMetaAtac[,full_id:=as.character(context_id)]
+
+# TODO: Preppare ppred data in train and test!!!
+predTrainMetaAtac <- subset(trainMetaAll, grepl("prediction", atac_path) | 
+                                          context=="HUVEC_none")
+predTrainMetaAtac$type <- "pred"
+predTrainMetaAtac[,full_id:=as.character(context_id)]
+predTrainMetaAtac <- subset(predTrainMetaAtac, !(full_id %in% trainMetaAtac$full_id))
+predTrainMetaAtac <- subset(predTrainMetaAtac, grepl("_none", context))
+
+predTestMetaAtac <- subset(testMetaAll, context %in% c("ESC_none", "Schwann_none"))
+predTestMetaAtac$type <- "pred"
+predTestMetaAtac[,full_id:=as.character(context_id)]
+predTestMetaAtac <- subset(predTestMetaAtac, !(full_id %in% testMetaAtac$full_id))
+predTestMetaAtac <- subset(predTestMetaAtac, grepl("_none", context))
+# => make sure it is not in matched data! (well actually its okay just make sure its only train data, also in insertion profiles, double check the ones which arent from the preditiont directory!!
 ```
+
+```{r, meta object}
+trainMetaAtac$type <- "train"
+trainMetaChIP$type <- "train"
+
+# it is actually the same context
+trainMetaAtac <- subset(trainMetaAtac, full_id!="33")
+trainMetaAtac <- rbind(trainMetaAtac, predTrainMetaAtac)
+trainMetaChIP[,full_id:=fifelse(full_id=="33", "165", full_id)]
+
+testMetaAtac$type <- "test"
+testMetaAtac <- rbind(testMetaAtac, predTestMetaAtac)
+testMetaChIP$type <- "test"
+
+metaTrainObject <- merge(trainMetaChIP[,c("full_id", "tf_name", "context", "file_path")], 
+                         trainMetaAtac[,c("full_id","type", "atac_path", "context")], 
+                         by.x=c("full_id"), 
+                         by.y=c("full_id"), 
+                         allow.cartesian=TRUE, all.x=TRUE, all.y=TRUE)
+metaTrainObject[,type:=fifelse(is.na(type), "train", type)]
+metaTrainObject[,is_matched:=fifelse(!is.na(atac_path) & !is.na(file_path), TRUE, FALSE)]
+table(metaTrainObject$type, metaTrainObject$is_matched)
+metaTrainObject$type <- "train"
+metaTrainObject[,context:=fifelse(is.na(context.y), context.x, context.y)]
+metaTrainObject$context.x <- metaTrainObject$context.y <- NULL
+
+metaTestObject <- merge(testMetaChIP[,c("full_id","type", "tf_name", "context", "file_path")], 
+                        testMetaAtac[,c("full_id","type", "context", "atac_path")], 
+                        by.x=c("full_id", "type"), 
+                        by.y=c("full_id", "type"), 
+                        allow.cartesian=TRUE, all.x=TRUE, all.y=TRUE)
+metaTestObject[,type:=fifelse(is.na(type), "test", type)]
+metaTestObject[,is_matched:=fifelse(!is.na(atac_path) & !is.na(file_path), TRUE, FALSE)]
+table(metaTestObject$type, metaTestObject$is_matched)
+metaTestObject$type <- "test"
+metaTestObject[,context:=fifelse(is.na(context.y), context.x, context.y)]
+metaTestObject$context.x <- metaTestObject$context.y <- NULL
+
+metaObject <- rbind(metaTrainObject, metaTestObject, fill=TRUE, use.names=TRUE)
+metaObject[,context_name:=gsub("_none", "", context)]
+saveRDS(metaObject, file.path(outDir, "01_maeAll_meta.rds"))
+
+metaPred <- subset(metaObject, 
+                   context_name %in% list.dirs("../data/atac/prediction", 
+                                               full.names=FALSE))
+metaPred <- unique(metaPred, by="full_id")
+saveRDS(metaPred, file.path(outDir, "prediction_meta.rds"))
+```
+
 
 ### Reference Coordinates
 
 ```{r}
 # DHS sites + mouse liftover DHS + ATLAS ATAC peaks
-coords <- readRDS("../data/hybrid.custom.hg38.resized.resplit.rds")
+coords <- readRDS(params$refCoordsPath)
 ```
 
 ### Cofactors
 
 ```{r, get the cofactors}
-allTfs <- readRDS("../data/allTfs.rds")
-allCofactors <- readRDS("../data/allCofactors.rds")
-cofactorMap <- readRDS("../data/cofactorMaps.rds")
+allTfs <- readRDS(params$tfsListPath)
+cofactorMap <- fread(params$cofactorMapPath)
+
+# this is not strictly needed (but has been used)
+#allCofactors <- unique(c(cofactorMap$tf_train, cofactorMap$tf_train_cofactor))
 ```
 
 ### Motif
@@ -73,7 +177,8 @@ cofactorMap <- readRDS("../data/cofactorMaps.rds")
 
 ```{r, attach additional motif data, eval=TRUE}
 motifData <- list.files(motifDir, full.names=TRUE, recursive=TRUE)
-motifData <- motifData[!(grepl("scoreMatrix", motifData))]
+motifData <- motifData[!(grepl("scoreMatrix", motifData)) & 
+                         grepl(".rds", motifData)]
 names(motifData) <- gsub(".rds","", basename(motifData))
 ```
 
@@ -81,7 +186,7 @@ names(motifData) <- gsub(".rds","", basename(motifData))
 
 ```{r, tf promoter coordinates}
 edb <- EnsDb.Hsapiens.v86
-tfs <- c(allTfs,allCofactors)
+tfs <- unique(allTfs) # unique(c(allTfs,allCofactors))
 txCoords <- transcripts(edb, 
                         columns=c("tx_seq_start"),
                         filter=GeneNameFilter(tfs))
@@ -128,11 +233,11 @@ chIPDataSmall <- c(trainChIPMetaSmall$file_path)
 names(chIPDataSmall) <- paste(trainChIPMetaSmall$full_id, 
                               trainChIPMetaSmall$tf_name, sep="_")
 
-tfs <- c(tfs, subset(cofactorMap, tf_train %in% tfs)$tf_train_cofactor)
+tfs <- c(tfs, subset(cofactorMap, tf %in% tfs)$tf_cofactor)
 subNames <- grep(paste(tfs,collapse="|"), names(motifData), value=TRUE)
 motifDataSmall <- motifData[names(motifData) %in% subNames] 
 
-outDirSmall <- "./mae_small"
+outDirSmall <- file.path(outDir, "mae_small")
 if(!dir.exists(outDirSmall)) dir.create(outDirSmall)
 maeSmall <- prepData(refCoords=coords, 
                 motifData=motifDataSmall,
@@ -162,13 +267,9 @@ mae <- prepData(refCoords=coords,
                 weightCol="rep_prob",
                 isUncertainCol="is_uncertain",
                 saveHdf5=TRUE,
-                outDir=".", 
+                outDir=outDir, 
                 BPPARAM=BPPARAM)
-
-#atacData <- append(atacData[names(atacData)!="98-2"],
-#                   atacData[names(atacData)=="98-2"], after=0)
-
-saveRDS(mae, "maeAllHdf5.rds")
+saveRDS(mae, file.path(outDir, "01_maeAll.rds"))
 gc()
 ```
 

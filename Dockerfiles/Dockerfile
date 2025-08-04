@@ -1,7 +1,15 @@
 FROM bioconductor/bioconductor_docker:RELEASE_3_21
+COPY ./Dockerfiles/renv.lock /tmp/renv.lock
 
-MAINTAINER emanuel.sonder@hest.ethz.ch
+ENV http_proxy=http://proxy.ethz.ch:3128
+ENV https_proxy=http://proxy.ethz.ch:3128
+ENV HTTP_PROXY=http://proxy.ethz.ch:3128
+ENV HTTPS_PROXY=http://proxy.ethz.ch:3128
 
-RUN R -e "if (!requireNamespace('devtools', quietly=TRUE)) install.packages('devtools', repos='https://cloud.r-project.org')"
-
-RUN R -e "devtools::install_github('https://github.com/ETHZ-INS/TFBlearner')"
+RUN R -e "options(timeout = 3600); \
+          options(repos = c(CRAN = 'https://cloud.r-project.org/')); \
+          install.packages('renv'); \
+                    library(renv); \
+          renv::restore(lockfile = '/tmp/renv.lock'); \
+          devtools::install_github('https://github.com/ETHZ-INS/TFBlearner', upgrade='never'); \
+          install.packages('R.utils')"

@@ -1,43 +1,63 @@
 ---
 title: "02.8 Insertion profiles"
 output: html_document
-date: '2023-07-05'
 params: 
+  maePath:
+    label: "maePath"
+    value: ./mae.rds
+  metaObjectPath:
+    label: "metaObjectPath"
+    value: ./mae_meta.rds  
+  tfsListPath:
+    label: "tfsListPath"
+    value: "tfsListPath.tsv"
+  seed:
+    label: "seed"
+    value: 42
+  metaDir:
+    label: "metaDir"
+    value: ./metaData
   motifDir: 
     label: "motifDir"
     value: ./motifData
   outDir:
     label: "outDir"
-    value: ./insertsion
+    value: ./insertions
 ---
 
 ```{r, setup}
 suppressPackageStartupMessages({
-  library(phastCons100way.UCSC.hg38)
   library(BSgenome.Hsapiens.UCSC.hg38)
-  library(EnsDb.Hsapiens.v86)
   library(ggplot2)
   library(viridis)
   library(patchwork)
   library(RColorBrewer)
   library(TFBlearner)
 })
+seed <- params$seed
+set.seed(seed) # only needed when subsampling
 ```
 
 ```{r, paths}
-allTfs <- readRDS("../data/allTfs.rds")
-maePath <- "./mae_small/mae_small_hdf5.rds" #"../data/mae_all.rds"
+allTfs <- readRDS(params$tfsListPath)
+maePath <- params$maePath
+metaMaePath <- params$metaObjectPath
 
+metaDir <- params$metaDir
 motifDir <- params$motifDir
 outDir <- params$outDir
 if(!dir.exists(outDir)) dir.create(outDir)
 ```
 
+```{r, load mae data}
+mae <- readRDS(maePath)
+metaMae <- readRDS(metaMaePath)
+```
+
+
 # Calculate Profile for each cellular context X Tf
 
-```{r, per context profiles, eval=TRUE, error=TRUE}
-mae <- readRDS(maePath)
-allTfs <- intersect(allTfs, colData(mae[["ChIP"]])$tfName)
+```{r, per context profiles, eval=TRUE}
 maxScores <- colData(mae[["Motifs"]])[,c("motifName", "maxScore")]
 maxScores <- as.data.table(maxScores)
 maxScores[,maxScore:=maxScore/TFBlearner:::scalFactMotif]
@@ -47,29 +67,37 @@ cols <- lapply(experiments(mae), function(n) {
         colnames(n)[colnames(n) %in% unique(subset(sampleMap(mae), 
             isTraining)$colname)]})
 mae <- subsetByColumn(mae, cols)
-
-refCoords <- rowRanges(experiments(mae)$Motifs)
-chIPMeta <- as.data.table(subset(sampleMap(mae), assay=="ChIP"))
+basePath <- metadata(colData(experiments(mae)$ATAC))$baseDir
 atacMeta <- as.data.table(subset(colData(experiments(mae)$ATAC)))
-chIPMeta[,c("context", "tf"):=tstrsplit(colname, split="_", keep=1:2)]
+refCoords <- rowRanges(mae[["ATAC"]])
+
+metaMatched <- subset(metaMae, is_matched & type=="train")
+allTfs <- intersect(allTfs, unique(metaMatched$tf_name))
 
 lapply(allTfs, function(tfI){
   tryCatch({
-  contexts <- unique(subset(chIPMeta, tf==tfI)$context)
+  contexts <- unique(subset(metaMatched, tf_name==tfI)$full_id)
   motifFileName <- file.path(motifDir, paste0(tfI, ".rds"))
-  maxScore <- subset(maxScores, motifName==tfI)$maxScore
-
-  if(file.exists(motifFileName)){
+  
+  allInsConsFiles <- file.path(outDir, paste0(paste(tfI, contexts, sep="_"), ".rds"))
+  if(file.exists(motifFileName) & 
+     length(contexts)>0 & 
+     !all(file.exists(allInsConsFiles))){
+    maxScore <- subset(maxScores, motifName==tfI)$maxScore
     motifMatches <- readRDS(file.path(motifDir, paste0(tfI, ".rds")))
     motifMatches <- motifMatches[motifMatches$score>=(maxScore/2)]
     seqlevelsStyle(motifMatches) <- seqlevelsStyle(refCoords)
-    motifMatches <- subsetByOverlaps(motifMatches, refCoords)
+    motifMatches <- subsetByOverlaps(motifMatches, refCoords)}
+  else{
+    return(NULL)
+  }
   
   lapply(contexts, function(contextI){
-    if(file.exists(file.path(outDir, paste0(paste(tfI, contextI, sep="-")), ".rds"))){
+    if(file.exists(file.path(outDir, paste0(paste(tfI, contextI, sep="_"), ".rds")))){
       return(NULL)
     }
-    atacPath <- unlist(unique(subset(atacMeta, context==contextI)$origin))
+    atacPath <- file.path(basePath, 
+                          unlist(unique(subset(atacMeta, context==contextI)$origin)))
     fragData <- lapply(atacPath, TFBlearner:::.processData, shift=FALSE)
     fragData <- rbindlist(fragData)
     
@@ -94,10 +122,7 @@ lapply(allTfs, function(tfI){
     else{
       return(NULL)
     }
-  })}
-  else{
-    return(NULL)
-  }},
+  })},
   error=function(cond){
     message(paste("Could not compute insertion profiles for", tfI))
     message(conditionMessage(cond))
@@ -110,28 +135,16 @@ lapply(allTfs, function(tfI){
 
 # Insertion Profiles
 
-```{r, mean/median profiles, eval=TRUE, error=TRUE}
-mae <- readRDS(maePath)
-
-# subset to training only data
-cols <- lapply(experiments(mae), function(n) {
-        colnames(n)[colnames(n) %in% unique(subset(sampleMap(mae), 
-            isTraining)$colname)]})
-mae <- subsetByColumn(mae, cols)
-
-refCoords <- rowRanges(experiments(mae)$Motifs)
-chIPMeta <- as.data.table(subset(sampleMap(mae), assay=="ChIP"))
-atacMeta <- as.data.table(subset(colData(experiments(mae)$ATAC)))
-chIPMeta[,c("context", "tf"):=tstrsplit(colname, split="_", keep=1:2)]
-
+```{r, mean/median profiles, eval=TRUE}
 insFiles <- list.files(outDir)
 insFiles <- insFiles[!grepl("median", insFiles) & !grepl("_plot", insFiles)]
 insFiles <- data.table(file_name=insFiles)
 insFiles[,c("tf", "context"):=tstrsplit(file_name, split="_", keep=1:2)]
 insFiles[,context:=substr(context, 1, nchar(context)-4)]
 
-lapply(unique(chIPMeta$tf), function(tfI){
-  subInsFiles <- subset(insFiles, tf==tfI)
+profileMap <- data.table()
+lapply(allTfs, function(tfI){
+  subInsFiles <- subset(insFiles, tf==tfI & context %in% metaMatched$full_id)
   if(nrow(subInsFiles)>0){
     paths <- file.path(outDir, subInsFiles$file_name)
   
@@ -155,10 +168,16 @@ lapply(unique(chIPMeta$tf), function(tfI){
     ggsave(file.path(outDir, paste(tfI, "plot.png", sep="_")), medianProfilePlot)
   
     gc()
-    saveRDS(profilesMean, file.path(outDir, paste(tfI, "median.rds", sep="_")))
+    profilePath <- file.path(outDir, paste(tfI, "median.rds", sep="_"))
+    saveRDS(profilesMean, profilePath)
+    profileIt <- data.table(tf=tfI, profile_path=profilePath)
+    profileMap <- rbind(profileMap, profileIt, fill=TRUE, use.names=TRUE)
   }
   else{
     return(NULL)
   }
 })
+
+write.table(profileMap, file.path(metaDir, "profileMap.tsv"), sep="\t", 
+            row.names=FALSE, quote=FALSE)
 ```

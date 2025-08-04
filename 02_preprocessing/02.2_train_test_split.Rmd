@@ -2,6 +2,13 @@
 title: "02.2 Train-Test-Split"
 output: html_document
 date: "2025-21-01"
+params: 
+  metaDataPath: 
+    label: metaDataPath
+    value: "meta.tsv"
+  outDir:
+    label: "outDir"
+    value: ./outDir
 ---
 
 ```{r, setup}
@@ -11,7 +18,8 @@ library(knitr)
 
 Import metadata:
 ```{r}
-meta <- readRDS("../data/meta_data/01_fullReMetaAll.rds")
+meta <- readRDS(params$metaDataPath)
+outDir <- params$outDir
 ```
 
 ```{r, results="asis"}
@@ -29,7 +37,8 @@ Test cellular contexts: Embryonic stem cells & jurkat
 ```{r, split of test}
 test <- subset(meta, grepl("jurkat", context, ignore.case=TRUE) | 
                      grepl("WA", context, ignore.case=TRUE) |
-                     grepl("embryonic", context, ignore.case=TRUE))
+                     grepl("embryonic", context, ignore.case=TRUE) | 
+                     grepl("ESC", context, ignore.case=TRUE))
 unique(subset(test,is_matched)$context_id)
 unique(subset(test, is_matched)$tf_name)
 
@@ -37,8 +46,8 @@ train <- meta[!test, on=c("context_id",
                           "db_id_ATAC", 
                           "db_id_chIP")]
 
-saveRDS(train, "../data/meta_data/02_trainMetaAll.rds")
-saveRDS(test, "../data/meta_data/02_testMetaAll.rds")
+saveRDS(train, file.path(outDir, "03_trainMetaAll.rds"))
+saveRDS(test, file.path(outDir, "03_testMetaAll.rds"))
 ```
 
 ```{r, sessioninfo}

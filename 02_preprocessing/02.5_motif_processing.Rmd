@@ -3,12 +3,21 @@ title: "02.5 Motif Processing"
 output: html_document
 date: '2025-21-01'
 params: 
+  metaChIPPath:
+    label: "metaChIPPath"
+    value: "metaChIP.tsv"
+  refCoordsPath:
+    label: "refCoordsPath"
+    value: "refCoords.rds"
   motifDir: 
     label: "motifDir"
     value: ./motifData
-  outDir: 
-    label: "outDir"
-    value: ./outDir
+  outDirMotifs: 
+    label: "outDirMotifs"
+    value: ./outDirMotifs
+  outDirMeta:
+    label: "outDirMeta"
+    value: ./outDirMeta
 ---
 
 ```{r, setup}
@@ -21,10 +30,11 @@ suppressPackageStartupMessages({
 
 ```{r, paths}
 motifDir <- params$motifDir
-outDir <- params$outDir
+outDir <- params$outDirMotifs
+outDirMeta <- params$outDirMeta
 
-coordsPath <- "../data/hybrid.custom.hg38.resized.resplit.rds"
-chIPMetaPath <- "../data/meta_data/01_fullMetaChIPAll.rds"
+coordsPath <- params$refCoordsPath
+chIPMetaPath <- params$metaChIPPath
 ```
 
 ## Data specification
@@ -71,8 +81,7 @@ cofactors <- subset(cofactors, target_genesymbol %in% allCoveredTfs |
 allCofactors <- unique(c(cofactors$target_genesymbol, 
                          cofactors$source_genesymbol))
 allTfs <- unique(c(allCofactors, allCoveredTfs))
-saveRDS(allTfs, "../data/allTfs.rds")
-saveRDS(allCofactors, "../data/allCofactors.rds")
+saveRDS(allTfs, file.path(outDirMeta, "allTfs.rds"))
 ```
 
 ### Motif
@@ -93,7 +102,9 @@ motifNames <- motifNames[whichTfs]
 ```
 
 ```{r, preparing dimer motifs data, eval=TRUE}
-dimerMotifs <- readRDS("../data/motifs/dhs_dimer_motif_scoreMatrix.rds")
+dimerMotifs <- readRDS(file.path(motifDir, 
+                                 "dimer_motifs",
+                                 "dhs_dimer_motif_scoreMatrix.rds"))
 outDirDimers <- file.path(outDir, "dimer_motifs")
 if(!dir.exists(outDirDimers)) dir.create(outDirDimers)
 
@@ -108,7 +119,9 @@ for(dimer in colnames(dimerMotifs)){
 ```
 
 ```{r, preparing dinuc motifs data, eval=TRUE}
-dinucMotifs <- readRDS("../data/motifs/dhs_dinuc_motif_scoreMatrix.rds")
+dinucMotifs <- readRDS(file.path(motifDir, 
+                                 "dinucleotide_motifs", 
+                                 "dhs_dinuc_motif_scoreMatrix.rds"))
 outDirDinuc <- file.path(outDir, "dinucleotide_motifs")
 if(!dir.exists(outDirDinuc)) dir.create(outDirDinuc)
 

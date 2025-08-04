@@ -3,9 +3,21 @@ title: "02.3 Labels & Weights"
 output: html_document
 date: '2024-07-05'
 params: 
-  outDir: 
-    label: "outDir"
-    value: ./outDir
+  metaTrainPath:
+    label: "metaTrainPath"
+    value: "metaTrainPath.tsv"
+  metaChIPPath:
+    label: "metaChIPPath"
+    value: "metaChIP.tsv"
+  refCoordsPath:
+    label: "refCoordsPath"
+    value: "refCoords.rds"
+  outDirMeta: 
+    label: "outDirMeta"
+    value: ./outDirMeta
+  outDirChIP: 
+    label: "outDirChIP"
+    value: ./outDirChIP
 ---
 
 ```{r, setup}
@@ -26,16 +38,19 @@ set.seed(seed)
 ```
 
 ```{r, paths}
-outDir <- params$outDir
+outDirMeta <- params$outDirMeta
+if(!dir.exists(outDirMeta)) dir.create(outDirMeta)
+
+outDir <- params$outDirChIP
 if(!dir.exists(outDir)) dir.create(outDir)
 
-metaTrainData <- readRDS("../data/meta_data/02_trainMetaAll.rds")
-metaDataChIP <- readRDS("../data/meta_data/01_fullMetaChIPAll.rds")
+metaTrainData <- readRDS(params$metaTrainPath)
+metaDataChIP <- readRDS(params$metaChIPPath)
 
 metaDataChIP <- subset(metaDataChIP, 
                        combination_id %in% metaTrainData$combination_id)
 
-refCoords <- readRDS("../data/hybrid.custom.hg38.resized.resplit.rds")
+refCoords <- readRDS(params$refCoordsPath)
 ```
 
 ```{r, determine replicated experiments}
@@ -108,14 +123,11 @@ plot.Gam(mod, se=TRUE)
 ```
 
 ```{r, save model, error=TRUE, eval=TRUE}
-saveRDS(mod, "../data/gam_rep.rds")
-#save(mod, file = "../../TFBlearner/R/sysdata.rda")
+saveRDS(mod, file.path(outDirMeta, "gam_rep.rds"))
 ```
 
 ```{r, reprocess, warning=FALSE, error=TRUE}
-mod <- readRDS("../data/gam_rep.rds")
 allCombs <- unique(metaDataChIP$combination_id)
-
 fns <- lapply(allCombs, function(comb){
   res <- getLabels(c(comb), metaDataChIP, refCoords, 
                    subset=FALSE, annotate=TRUE)
@@ -139,7 +151,7 @@ metaLabel[,file_path:=file.path(outDir, file_name)]
 metaLabel[,c("combination_id", 
              "tf_name",
              "cellular_context_id"):=tstrsplit(file_name, split="_", keep=1:3)]
-saveRDS(metaLabel, "../data/meta_data/03_trainMetaChIPAll.rds")
+saveRDS(metaLabel, file.path(outDirMeta, "04_trainMetaChIPAll.rds"))
 ```
 
 ```{r, sessioninfo}

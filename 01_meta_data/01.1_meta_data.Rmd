@@ -9,6 +9,9 @@ params:
   atacFilesDir:
     label: "atacFilesDir"
     value: ./atacData
+  outDir: 
+    label: "outDir"
+    value: ./outDir
 ---
 
 ```{r setup}
@@ -28,7 +31,7 @@ chIPFilesDir4 <- file.path(chIPFilesDirBase, "brainTF")
 metaEncodePath <- "../data/meta_data/fileListEncode.tsv"
 #metaEncodePath <- "../data/meta_data/chip_metadata.rds"
 
-outDir <- "../data/meta_data"
+outDir <- params$outDir
 
 absPath <- function(baseDir, relativePath){
   dir <- file.path(baseDir, relativePath)
@@ -498,13 +501,12 @@ metaMatch[,tf_id:=as.integer(factor(tf_name, levels=unique(metaMatch$tf_name)))]
 metaMatch[,combination_id:=paste(tf_name, context, sep="_")]
 metaMatch[,combination_id:=as.integer(factor(combination_id, 
                                       levels=unique(metaMatch$combination_id)))]
-#metaMatch[,combination_id:=fifelse(is_matched, combination_id, NA)]
 
 metaMatchAll <- metaMatch
 metaMatch <- subset(metaMatch, is_matched)
 
-saveRDS(metaMatch, absPath(outDir, "fullMetaMatched.rds"))
-saveRDS(metaMatchAll, absPath(outDir, "fullMetaAll.rds"))
+saveRDS(metaMatch, absPath(outDir, "01_fullMetaMatched.rds"))
+saveRDS(metaMatchAll, absPath(outDir, "01_fullMetaAll.rds"))
 ```
 
 ```{r, sessioninfo}

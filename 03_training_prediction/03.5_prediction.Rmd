@@ -48,7 +48,7 @@ print(Sys.time())
 
 ## Parameters
 
-```{r, parameters}
+```{r, parameters, error=TRUE}
 seed <- params$seed
 set.seed(seed)
 
@@ -91,7 +91,7 @@ predBatched <- fifelse(!predSerial, TRUE, FALSE)
 
 # Load inputs
 
-```{r, prepare meta data}
+```{r, prepare meta data, error=TRUE}
 mae <- readRDS(params$maePath)
 trainingContexts <- getContexts(mae, tfName=tfName, which="Both")
 

@@ -117,7 +117,7 @@ if(length(trainingContexts)>1 & trainModel & params$crossValidate){
 saveHdf5 <- TRUE
 ```
 
-```{r, get Feature-Matrix, eval=trainModel}
+```{r, get Feature-Matrix, eval=trainModel, error=TRUE}
 ptm <- proc.time()
 fm <- getFeatureMatrix(mae, tfName=tfName, 
                             whichCol="OnlyTrain", 
@@ -145,7 +145,7 @@ print(proc.time()-ptm)
 gc()
 ```
 
-```{r, split feature matrix by holdout chromosomes, eval=trainModel}
+```{r, split feature matrix by holdout chromosomes, eval=trainModel, error=TRUE}
 rangesFm <- rowRanges(fm)
 rangeDt <- as.data.table(rangesFm)
 rangeDt[,row_id:=1:.N]
@@ -166,7 +166,7 @@ gc()
 
 # Cross-validation on Training data
 
-```{r, setup feature importance & performance estimates, eval=trainModel}
+```{r, setup feature importance & performance estimates, eval=trainModel, error=TRUE}
 prAll <- data.table()
 featImpAll <- data.table()
 hpAll <- data.table()
@@ -368,7 +368,7 @@ print(proc.time()-ptm)
 
 # Train on Full
 
-```{r, train, eval=trainModel}
+```{r, train, eval=trainModel, error=TRUE}
 modsFull <- trainTfModel(tfName=tfName, fm, 
                          measureName="classif.aucpr", 
                          stackingStrat="wMean",
@@ -406,7 +406,7 @@ write.table(preMotifs,
             quote=FALSE, row.names=FALSE, sep="\t")
 ```
 
-```{r, feature importance on holdout chromosomes, eval=trainModel}
+```{r, feature importance on holdout chromosomes, eval=trainModel, error=TRUE}
 predValChrs <- predictTfBinding(modsFull, fmValChrsSub, chunk=NULL, 
                                 simplified=FALSE, BPPARAM=SerialParam())
 nonFlankValChr <- which(predValChrs[,TFBlearner:::BINLABELNAME]>=0)

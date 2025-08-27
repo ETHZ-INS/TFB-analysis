@@ -1,0 +1,48 @@
+---
+title: "03.2 Context-features"
+output: html_document
+params: 
+  maePath:
+    label: "maePath"
+    value: "./mae.rds"
+  seed:
+    label: "seed"
+    value: 42
+  outDir: 
+    label: "outDir"
+    value: "./data"
+---
+
+```{r, setup}
+suppressPackageStartupMessages({
+library(BSgenome.Hsapiens.UCSC.hg38)
+library(phastCons100way.UCSC.hg38)
+library(EnsDb.Hsapiens.v86)
+library(TFBlearner)
+library(BiocParallel)
+})
+
+seed <- params$seed
+set.seed(seed)
+```
+
+
+## Load the data
+```{r, prepare meta data}
+outDir <- params$outDir
+if(!dir.exists(outDir)) dir.create(outDir)
+
+mae <- readRDS(params$maePath)
+```
+
+## Pan-context and context-specific features
+
+```{r, context-features}
+mae <- panContextFeatures(mae, seed=seed, saveHdf5=TRUE, 
+                          outDir=outDir)
+saveRDS(mae, file.path(outDir, "03_maeAll_conFeat.rds"))
+```
+
+```{r}
+sessionInfo()
+```

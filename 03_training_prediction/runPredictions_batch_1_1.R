@@ -11,6 +11,9 @@ tfNamesBatch <- tfNamesBatch[1:floor(length(tfNamesBatch)/2)]
 
 outBaseDir <- "data/predictions"
 cofactors <- readRDS("data/meta_data/topInteractors.rds")
+cofactors <- lapply(cofactors, \(x) x[!is.na(x)])
+cofactors <- cofactors[lengths(cofactors)>0]
+tfNamesBatch <- intersect(tfNamesBatch, names(cofactors))
 
 maePath <- "../data/04_maeAll_conFeat_sub.rds"
 predContexts <- readRDS("data/prediction_meta.rds")

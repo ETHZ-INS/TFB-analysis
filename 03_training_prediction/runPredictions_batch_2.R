@@ -10,12 +10,17 @@ tfNamesBatch <- unique(subset(metaAg, n_con==2)$tf_name)
 
 outBaseDir <- "data/predictions"
 cofactors <- readRDS("data/meta_data/topInteractors.rds")
+cofactors <- lapply(cofactors, \(x) x[!is.na(x)])
 
 maePath <- "../data/04_maeAll_conFeat_sub.rds"
 predContexts <- readRDS("data/prediction_meta.rds")
 predContexts <- unique(predContexts$full_id)
 
+tfNamesBatch <- intersect(tfNamesBatch, names(cofactors))
+tfNamesBatch <- setdiff(tfNamesBatch, c("TOX4","SNRNP70"))
+
 for(tf in tfNamesBatch){
+  print(tf)
   outDir <- file.path(outBaseDir, tf)
   outDir2 <- file.path("..", outBaseDir, tf)
 

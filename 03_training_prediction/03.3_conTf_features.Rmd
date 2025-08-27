@@ -86,6 +86,7 @@ coords <- rowRanges(experiments(mae)[["ChIP"]])
 
 tfCofactors <- params$cofactors
 tfCofactors <- unique(tfCofactors)
+if(length(tfCofactors)==0 || all(gsub(' ', '',tfCofactors)=="")) tfCofactors <- NULL
 tfCofactors
 
 if(file.exists(profilesPath)){

@@ -87,7 +87,7 @@ coords <- rowRanges(experiments(mae)[["ChIP"]])
 tfCofactors <- params$cofactors
 tfCofactors <- unique(tfCofactors)
 if(length(tfCofactors)==0 || all(gsub(' ', '',tfCofactors)=="")) tfCofactors <- NULL
-tfCofactors
+tfCofactors <- setdiff(tfCofactors, tfName)
 
 if(file.exists(profilesPath)){
   if(grepl(".tsv", profilesPath)){

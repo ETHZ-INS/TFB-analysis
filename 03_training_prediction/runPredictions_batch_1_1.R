@@ -11,7 +11,7 @@ tfNamesBatch <- tfNamesBatch[1:floor(length(tfNamesBatch)/2)]
 
 outBaseDir <- "data/predictions"
 cofactors <- readRDS("data/meta_data/topInteractors.rds")
-cofactors <- lapply(cofactors, \(x) x[!is.na(x)])
+cofactors <- lapply(cofactors, \(x) x[!is.na(x) & x!="ZNF37A"])
 cofactors <- cofactors[lengths(cofactors)>0]
 tfNamesBatch <- intersect(tfNamesBatch, names(cofactors))
 
@@ -20,6 +20,7 @@ predContexts <- readRDS("data/prediction_meta.rds")
 predContexts <- unique(predContexts$full_id)
 
 for(tf in tfNamesBatch){
+  print(tf)
   outDir <- file.path(outBaseDir, tf)
   outDir2 <- file.path("..", outBaseDir, tf)
 
@@ -41,37 +42,13 @@ for(tf in tfNamesBatch){
 
   # get the profiles path
   profilesPath <- file.path("../data/insertions", paste(tf, "median.rds", sep="_"))
-  if(file.exists(outFileFeat1)){
-    if(!file.exists(outFileTrain1)){
-      rmarkdown::render("./03_training_prediction/03.4_training.Rmd",
-                        params=list(tfName=tf,
-                                    cofactors=cofactors[[tf]],
-                                    maePath=maeTfPath,
-                                    outDir=outDir2,
-                                    profilesPath=profilesPath,
-                                    predContext=predContexts,
-                                    crossValidate=TRUE,
-                                    seed=seed),
-                        output_file=outFileTrain2)
-    }
-
-    if(!file.exists(outFilePred1)){
-      rmarkdown::render("./03_training_prediction/03.5_prediction.Rmd",
-                        params=list(tfName=tf,
-                                    cofactors=cofactors[[tf]],
-                                    maePath=maeTfPath,
-                                    modelPath=modelPath,
-                                    featsToRemovePath=featsToRemovePath,
-                                    outDir=outDir2,
-                                    profilesPath=profilesPath,
-                                    predContext=predContexts,
-                                    serial=FALSE,
-                                    seed=seed),
-                        output_file=outFilePred2)
-    }
-    else{
-      next
-    }
+  if((file.exists(outFileFeat1) &&
+      !any(grepl("Error in", readLines(outFileFeat1)))) &&
+     (file.exists(outFileTrain1) && 
+      !any(grepl("Error in", readLines(outFileTrain1)))) &&
+     (file.exists(outFilePred1) && 
+      !any(grepl("Error in", readLines(outFilePred1))))){
+    next
   }
   else{
     rmarkdown::render("./03_training_prediction/03.3_conTf_features.Rmd",

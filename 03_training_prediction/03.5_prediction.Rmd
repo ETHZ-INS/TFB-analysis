@@ -97,6 +97,8 @@ trainingContexts <- getContexts(mae, tfName=tfName, which="Both")
 
 tfCofactors <- params$cofactors
 tfCofactors <- unique(tfCofactors)
+if(length(tfCofactors)==0 || all(gsub(' ', '',tfCofactors)=="")) tfCofactors <- NULL
+tfCofactors <- setdiff(tfCofactors, tfName)
 tfCofactors
 
 models <- loadModels(modelPath)
@@ -235,7 +237,27 @@ gc()
 ```
 
 ```{r, clean up}
-file.remove(params$maePath)
+expPredFiles <- file.path(outDir,
+                          paste0(paste("pred", predContexts, tfName, sep="_"),
+                                       ".tsv.gz"))
+if(all(file.exists(expPredFiles))){
+  file.remove(params$maePath)}
+```
+
+```{r, save version}
+if(all(file.exists(expPredFiles))){
+  con <- file("../CHANGELOG.md","r")
+  predVersion <- readLines(con, n=1)
+  close(con)
+  predVersion <- unlist(tstrsplit(predVersion, split="[", keep=2, fixed=TRUE))
+  predVersion <- unlist(tstrsplit(predVersion, split="]", keep=1, fixed=TRUE))
+  versionDt <- data.table(run_version=predVersion,
+                          TFBlearner_version=packageVersion("TFBlearner"))
+  
+  write.table(versionDt, sep="\t", 
+              file=file.path(outDir, "version.tsv"),
+              quote=FALSE, row.names=FALSE)
+}
 ```
 
 ```{r, sessionInfo}

@@ -86,6 +86,8 @@ coords <- rowRanges(experiments(mae)[["ChIP"]])
 
 tfCofactors <- params$cofactors
 tfCofactors <- unique(tfCofactors)
+if(length(tfCofactors)==0 || all(gsub(' ', '',tfCofactors)=="")) tfCofactors <- NULL
+tfCofactors <- setdiff(tfCofactors, tfName)
 tfCofactors
 
 if(file.exists(profilesPath)){
@@ -109,11 +111,6 @@ if(!is.null(profile)){
 Determine training and testing data:
 ```{r, determine training and testing data}
 trainingContexts <- getContexts(mae, tfName=tfName, which="Both")
-if(length(trainingContexts)>1 & trainModel & params$crossValidate){
-  doCv <- TRUE
-}else{
-  doCv <- FALSE
-}
 saveHdf5 <- TRUE
 ```
 
@@ -143,6 +140,24 @@ if(length(trainingContexts)==1){
 
 print(proc.time()-ptm)
 gc()
+```
+
+```{r, remove negative only contexts, eval=trainModel, error=TRUE}
+annoCol <- "context"
+# check for contexts which have no positive labels => remove from training data
+labelCountDt <- as.data.table(table(isPos=assays(fm)$features[,TFBlearner:::LABELCOLNAME]>0,
+                                    context=rowData(fm)[[annoCol]]))
+labelCountDt[,isPos:=as.logical(isPos)]
+zeroContexts <- subset(labelCountDt, isPos & N==0)$context
+
+trainingContexts <- setdiff(trainingContexts, zeroContexts)
+fm <- fm[!(rowData(fm)[[annoCol]] %in% zeroContexts),]
+
+if(length(trainingContexts)>1 & trainModel & params$crossValidate){
+  doCv <- TRUE
+}else{
+  doCv <- FALSE
+}
 ```
 
 ```{r, split feature matrix by holdout chromosomes, eval=trainModel, error=TRUE}
@@ -404,6 +419,33 @@ write.table(preMotifs,
             file=file.path(outDir, 
                            paste0(paste("selMotifs", tfName, sep="_"), ".tsv")),
             quote=FALSE, row.names=FALSE, sep="\t")
+
+# for convenience, save explicit feature names
+preSelMotifs <- metadata(fm)$preselMotif
+preSelActMotifs <- metadata(fm)$preselActMotif
+tfMotif <- preSelMotifs[["tfMotif_1"]]
+featNamesDt <- data.table(
+  feature_name=c(paste("tfFeat_coBind", gsub("Motif", "", names(metadata(fm)$tfCofactors)), sep="_"),
+                 paste("tfFeat_coMotifCount", names(preSelMotifs)[grepl("tf", names(preSelMotifs))], sep="_"),
+                 paste("tfFeat_motifMatch", names(preSelMotifs), sep="_"),
+                 paste("tfFeat_assocationMotifActivity", names(preSelActMotifs), sep="_"),
+                 paste("contextTfFeat_chromVAR.Activity", names(preSelActMotifs), sep="_"),
+                 "contextTfFeat_weightedInserts.margin_tfMotif_1_normed", 
+                 "contextTfFeat_weightedInserts.within_tfMotif_1_normed",
+                 "contextTfFeat_inserts.margin_tfMotif_1_normed",
+                 "contextTfFeat_inserts.within_tfMotif_1_normed"),
+  explicit_feature_name=c(paste("tfFeat_coBind", metadata(fm)$tfCofactors, sep="_"),
+                          paste("tfFeat_coMotifCount", preSelMotifs[grepl("tf", names(preSelMotifs))], sep="_"),
+                          paste("tfFeat_motifMatch", preSelMotifs, sep="_"),
+                          paste("tfFeat_assocationMotifActivity", preSelActMotifs, sep="_"),
+                          paste("contextTfFeat_chromVAR.Activity", preSelActMotifs, sep="_"),
+                          gsub("tfMotif_1", paste("motifMatch", tfMotif, sep="_"), "contextTfFeat_weightedInserts.margin_tfMotif_1_normed"),
+                          gsub("tfMotif_1", paste("motifMatch", tfMotif, sep="_"), "contextTfFeat_weightedInserts.within_tfMotif_1_normed"),
+                          gsub("tfMotif_1", paste("motifMatch", tfMotif, sep="_"), "contextTfFeat_inserts.margin_tfMotif_1_normed"),
+                          gsub("tfMotif_1", paste("motifMatch", tfMotif, sep="_"), "contextTfFeat_inserts.within_tfMotif_1_normed")))
+write.table(featNamesDt, sep="\t", 
+            file=file.path(outDir, "featureNameMap.tsv"),
+            quote=FALSE, row.names=FALSE)
 ```
 
 ```{r, feature importance on holdout chromosomes, eval=trainModel, error=TRUE}

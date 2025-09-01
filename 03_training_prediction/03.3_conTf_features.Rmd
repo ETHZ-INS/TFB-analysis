@@ -88,6 +88,7 @@ tfCofactors <- params$cofactors
 tfCofactors <- unique(tfCofactors)
 if(length(tfCofactors)==0 || all(gsub(' ', '',tfCofactors)=="")) tfCofactors <- NULL
 tfCofactors <- setdiff(tfCofactors, tfName)
+tfCofactors
 
 if(file.exists(profilesPath)){
   if(grepl(".tsv", profilesPath)){
@@ -131,10 +132,17 @@ saveHdf5 <- TRUE
 # TF-Features
 
 ```{r, tf-specific features}
+tfFeats <- c("Binding_Patterns", "Promoter_Association", "C_Score",
+             "Cooccuring_Motifs", "Cofactor_Binding", "CTCF_Signal", 
+             "Associated_Motifs", "Associated_Motif_Activity")
+if(!(tfName %in% rowData(mae[["ATAC.Promoters"]])$tf_name)){
+  tfFeats <- setdiff(tfFeats, "Promoter_Association")
+}
 ptm <- proc.time()
 mae <- tfFeatures(mae,
                   tfName=tfName,
                   tfCofactors=tfCofactors,
+                  features=tfFeats,
                   nPatterns=40,
                   nMotifs=5,
                   seed=seed)
@@ -165,14 +173,14 @@ if(is.null(profile)){
   saveRDS(profile, file.path(outDir, "profile.rds"))
 }
 
-conTFfeatures <- c("Inserts", "Weighted_Inserts", "ChromVAR_Scores")
+conTfFeats <- c("Inserts", "Weighted_Inserts", "ChromVAR_Scores")
 if(length(trainingContexts)==1){
-  conTFfeatures <- setdiff(conTFfeatures, "ChromVAR_Scores")
+  conTfFeats <- setdiff(conTfFeats, "ChromVAR_Scores")
 }
 
 mae <- contextTfFeatures(mae, tfName=tfName, 
                          whichCol="OnlyTrain",
-                         features=conTFfeatures,
+                         features=conTfFeats,
                          addLabels=TRUE, 
                          seed=seed,
                          profiles=profile)

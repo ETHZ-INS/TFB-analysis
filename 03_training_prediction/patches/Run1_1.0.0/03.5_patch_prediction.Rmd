@@ -1,0 +1,296 @@
+---
+title: "03.5 Patch Prediction"
+output: html_document
+date: '2025-21-01'
+params: 
+  tfName: 
+    label: "tfName"
+    value: ATF2
+  cofactors:
+    label: "cofactors"
+    value: ATF3
+  predContext:
+    label: "predContext"
+    value: !r c("A549")
+  maePath:
+    label: "maePath"
+    value: mae
+  outDir: 
+    label: "outDir"
+    value: "./out"
+  modelPath:
+    label: "modelPath"
+    value: ""
+  featsToRemovePath:
+    label: "featsToRemovePath"
+    value: NULL
+  serial:
+    label: "serial"
+    value: TRUE
+  seed:
+    label: "seed"
+    value: 42
+---
+
+```{r, setup}
+suppressPackageStartupMessages({
+  library(BSgenome.Hsapiens.UCSC.hg38)
+  library(TFBlearner)
+  library(data.table)
+  library(BiocParallel)
+  library(R.utils)
+})
+print(Sys.time())
+```
+
+## Parameters
+
+```{r, parameters, error=TRUE}
+seed <- params$seed
+set.seed(seed)
+outDir <- params$outDir
+
+numThreads <- min(16, getDTthreads())
+setDTthreads(numThreads)
+RcppML::setRcppMLthreads(numThreads)
+
+tfName <- params$tfName
+profilesPath <- params$profilesPath
+
+modelPath <- params$modelPath
+predContexts <- params$predContext
+print(predContexts)
+
+if(!is.null(params$featsToRemovePath)){
+  featsToRemove <- readRDS(featsToRemovePath)
+}else{
+  featsToRemove <- NULL
+}
+
+predSerial <- params$serial
+predBatched <- fifelse(!predSerial, TRUE, FALSE)
+```
+
+# Load inputs
+
+```{r, prepare meta data, error=TRUE}
+mae <- readRDS(params$maePath)
+
+baseDir <- metadata(colData(mae[[TFBlearner:::ATACEXP]]))[[TFBlearner:::BASEDIRCOL]]
+metadata(colData(mae[[TFBlearner:::ATACEXP]]))[[TFBlearner:::BASEDIRCOL]] <- file.path("../..", baseDir)
+
+baseDir <- metadata(colData(mae[[TFBlearner:::MOTIFEXP]]))[[TFBlearner:::BASEDIRCOL]]
+metadata(colData(mae[[TFBlearner:::MOTIFEXP]]))[[TFBlearner:::BASEDIRCOL]] <- file.path("../..", baseDir)
+
+
+trainingContexts <- getContexts(mae, tfName=tfName, which="Both")
+
+tfCofactors <- params$cofactors
+tfCofactors <- unique(tfCofactors)
+if(length(tfCofactors)==0 || all(gsub(' ', '',tfCofactors)=="")) tfCofactors <- NULL
+tfCofactors <- setdiff(tfCofactors, tfName)
+tfCofactors
+
+models <- loadModels(modelPath)
+
+conTFfeatures <- c("Inserts", "Weighted_Inserts", "ChromVAR_Scores")
+if(length(trainingContexts)==1){
+  conTFfeatures <- setdiff(conTFfeatures, "ChromVAR_Scores")
+}
+gc()
+```
+
+```{r, remove test data}
+smp <- as.data.table(sampleMap(mae))
+smp[assay %in% c("ATAC", "ATAC.Promoters", "chromVAR.Activity") & 
+    primary %in% predContexts,]$isTesting <- FALSE
+sampleMap(mae) <- smp
+
+cols <- lapply(experiments(mae), function(n) {
+        colnames(n)[colnames(n) %in% unique(subset(sampleMap(mae), 
+             !isTesting)$colname)]})
+mae <- subsetByColumn(mae, cols)
+```
+
+```{r, get TF features}
+tfFeats <- c("Binding_Patterns", "Promoter_Association", "C_Score",
+             "Cooccuring_Motifs", "Cofactor_Binding", "CTCF_Signal", 
+             "Associated_Motifs", "Associated_Motif_Activity")
+if(!(tfName %in% rowData(mae[["ATAC.Promoters"]])$tf_name)){
+   tfFeats <- setdiff(tfFeats, "Promoter_Association")}
+
+mae <- tfFeatures(mae,
+                  tfName=tfName,
+                  tfCofactors=tfCofactors,
+                  features=tfFeats,
+                  nPatterns=40,
+                  nMotifs=5,
+                  seed=seed)
+gc()
+```
+
+```{r, get insertion profiles}
+motifPath <- subset(colData(mae[[TFBlearner:::MOTIFEXP]]), 
+                      get(TFBlearner:::MOTIFNAMECOL)==tfName)$origin
+baseDir <- metadata(colData(mae[[TFBlearner:::MOTIFEXP]]))[[TFBlearner:::BASEDIRCOL]]
+motifRanges <- readRDS(file.path(baseDir, motifPath))
+  
+atacFragFilePaths <- unlist(subset(colData(mae[[TFBlearner:::ATACEXP]]),
+                                   context %in% trainingContexts)$origin)
+baseDir <- metadata(colData(mae[[TFBlearner:::ATACEXP]]))[[TFBlearner:::BASEDIRCOL]]
+atacFragPaths <- file.path(baseDir, atacFragFilePaths)
+names(atacFragPaths) <- names(atacFragFilePaths)
+  
+ins <- getInsertionProfiles(atacFragPaths, motifRanges)
+gc()
+saveRDS(ins$insertProfiles, file.path(outDir, "profile_train.rds"))
+profile <- list(ins$insertProfiles)
+names(profile) <- 1
+```
+
+# Predict
+
+```{r, predict batched, eval=predBatched, error=TRUE}
+experiments(mae)$contextTfFeat <- NULL
+
+setDTthreads(16)
+batchSize <- 2
+ptm <- proc.time()
+for(i in seq(1,length(predContexts), batchSize)){
+  predContextsBatch <- predContexts[i:min((i+batchSize-1),length(predContexts))]
+  ptm3 <- proc.time()
+  fms <- bplapply(predContextsBatch, function(context){
+     mae <- contextTfFeatures(mae, 
+                              tfName=tfName,
+                              whichCol="Col",
+                              colSel=context,
+                              features=conTFfeatures,
+                              addLabels=FALSE,
+                              insertionProfile=profile,
+                              seed=seed,
+                              BPPARAM=SerialParam())
+    fmPred <- getFeatureMatrix(mae, tfName=tfName,
+                                    whichCol="Col", 
+                                    colSel=context, 
+                                    addLabels=FALSE,
+                                    saveHdf5=FALSE)
+    fmPred <- fmPred[,!(colnames(fmPred) %in% featsToRemove)]
+    return(fmPred)},  
+    BPPARAM=MulticoreParam(workers=batchSize, timeout=300, force.GC=TRUE))
+  print(proc.time()-ptm3)
+  gc()
+      
+  ptm2 <- proc.time()
+  mapply(function(fm, context){
+    predCon <- predictTfBinding(models, fm, 
+                                chunk=NULL,
+                                simplified=FALSE,
+                                sparsify=TRUE,
+                                BPPARAM=SerialParam())
+    rm(fm)
+    preds <- as.data.table(as.matrix(predCon[,c("pred_stacked",
+                                                "pred_all_pos",
+                                                "pred_stacked_binarized")]))
+    rm(predCon)
+    preds[,pred_stacked:=round(pred_stacked, 3)]
+    preds[,pred_all_pos:=round(pred_all_pos, 3)]
+
+    if(context %in% trainingContexts){
+        lab <- assays(mae[["ChIP"]])$peaks[,paste(context, tfName, sep="_")]
+        lab <- round(lab, 2)
+        preds <- cbind(preds, lab)}
+  
+    predFilePath <- file.path(outDir,
+                              paste0(paste("pred", context, tfName, sep="_"),
+                                         ".tsv"))
+    write.table(preds, predFilePath, quote=FALSE, sep="\t", row.names=FALSE)
+    gzip(predFilePath, overwrite=TRUE)
+    return(NULL)}, fms, predContextsBatch)
+  rm(fms)
+  gc()
+  print(proc.time()-ptm2)
+}
+print(proc.time()-ptm)
+gc()
+```
+
+```{r, predict batched serial, eval=predSerial, error=TRUE}
+experiments(mae)$contextTfFeat <- NULL
+setDTthreads(16)
+ptm <- proc.time()
+
+for(context in predContexts){
+  ptm4 <- proc.time()
+  mae <- contextTfFeatures(mae, 
+                           tfName=tfName,
+                           whichCol="Col",
+                           colSel=context,
+                           features=conTFfeatures,
+                           addLabels=FALSE,
+                           insertionProfile=profile,
+                           seed=seed,
+                           BPPARAM=MulticoreParam(workers=8))
+  print(proc.time()-ptm4)
+  gc()
+  
+  ptm <- proc.time()
+  fmPred <- getFeatureMatrix(mae, tfName=tfName,
+                                  whichCol="Col", 
+                                  colSel=context,
+                                  addLabels=FALSE,
+                                  saveHdf5=FALSE)
+  experiments(mae)$contextTfFeat <- NULL
+  fmPred <- fmPred[,!(colnames(fmPred) %in% featsToRemove)]
+  print(proc.time()-ptm)
+  
+  gc()
+  ptm <- proc.time()
+  predCon <- predictTfBinding(models, fmPred, 
+                              chunk=NULL,
+                              simplified=FALSE,
+                              sparsify=TRUE,
+                              BPPARAM=SerialParam())
+  print(proc.time()-ptm)
+  gc()
+  preds <- as.data.table(as.matrix(predCon[,c("pred_stacked",
+                                              "pred_all_pos",
+                                              "pred_stacked_binarized")]))
+  preds[,pred_stacked:=round(pred_stacked, 3)]
+  preds[,pred_all_pos:=round(pred_all_pos, 3)]
+    
+  rm(predCon)
+  if(context %in% trainingContexts){
+      lab <- assays(mae[["ChIP"]])$peaks[,paste(context, tfName, sep="_")]
+      lab <- round(lab, 2)
+      preds <- cbind(preds, lab)}
+  
+  predFilePath <- file.path(outDir,
+                            paste0(paste("pred", context, tfName, sep="_"),
+                                         ".tsv"))
+  write.table(preds, predFilePath, quote=FALSE, sep="\t", row.names=FALSE)
+  gzip(predFilePath, overwrite=TRUE)
+  gc()
+}
+print(proc.time()-ptm)
+gc()
+```
+
+```{r, save version}
+expPredFiles <- file.path(outDir,
+                          paste0(paste("pred", predContexts, tfName, sep="_"),
+                                       ".tsv.gz"))
+if(all(file.exists(expPredFiles))){
+  versionDt <- data.table(run_version="1.0.0",
+                          is_patched=TRUE,
+                          TFBlearner_version=packageVersion("TFBlearner"))
+  
+  write.table(versionDt, sep="\t", 
+              file=file.path(outDir, "version_pred_patched.tsv"),
+              quote=FALSE, row.names=FALSE)
+}
+```
+
+```{r, sessionInfo}
+print(Sys.time())
+sessionInfo()
+```

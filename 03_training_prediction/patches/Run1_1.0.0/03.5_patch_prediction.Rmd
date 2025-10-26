@@ -1,7 +1,6 @@
 ---
 title: "03.5 Patch Prediction"
 output: html_document
-date: '2025-21-01'
 params: 
   tfName: 
     label: "tfName"

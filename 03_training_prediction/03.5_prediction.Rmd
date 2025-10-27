@@ -187,6 +187,7 @@ for(context in predContexts){
                            tfName=tfName,
                            whichCol="Col",
                            colSel=context,
+                           features=conTFfeatures,
                            addLabels=FALSE,
                            insertionProfile=profile,
                            seed=seed,

@@ -23,9 +23,6 @@ params:
   modelPath:
     label: "modelPath"
     value: ""
-  featsToRemovePath:
-    label: "featsToRemovePath"
-    value: NULL
   serial:
     label: "serial"
     value: TRUE
@@ -86,12 +83,6 @@ modelPath <- params$modelPath
 predContexts <- params$predContext
 print(predContexts)
 
-if(!is.null(params$featsToRemovePath)){
-  featsToRemove <- readRDS(featsToRemovePath)
-}else{
-  featsToRemove <- NULL
-}
-
 outDir <- params$outDir
 if(!dir.exists(outDir)) dir.create(outDir)
 
@@ -146,7 +137,6 @@ for(i in seq(1,length(predContexts), batchSize)){
                                     colSel=context, 
                                     addLabels=FALSE,
                                     saveHdf5=FALSE)
-    fmPred <- fmPred[,!(colnames(fmPred) %in% featsToRemove)]
     return(fmPred)},  
     BPPARAM=MulticoreParam(workers=batchSize, timeout=300, force.GC=TRUE))
   print(proc.time()-ptm3)
@@ -211,7 +201,6 @@ for(context in predContexts){
                                   addLabels=FALSE,
                                   saveHdf5=FALSE)
   experiments(mae)$contextTfFeat <- NULL
-  fmPred <- fmPred[,!(colnames(fmPred) %in% featsToRemove)]
   print(proc.time()-ptm)
   
   gc()

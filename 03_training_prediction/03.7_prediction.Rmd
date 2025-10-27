@@ -45,6 +45,17 @@ suppressPackageStartupMessages({
 print(Sys.time())
 ```
 
+```{r, rounding helper function}
+roundNonZero <- function(x, digits=3){
+  nonZeroInd <- which(x!=0)
+  signs <- sign(x)
+  xp <- round(x, digits=3)
+  xp[nonZeroInd] <- pmax(xp[nonZeroInd], 10^-digits)
+  xp <- signs*xp
+  return(xp)
+}
+```
+
 ## Parameters
 
 ```{r, parameters, error=TRUE}
@@ -153,12 +164,12 @@ for(i in seq(1,length(predContexts), batchSize)){
                                                 "pred_all_pos",
                                                 "pred_stacked_binarized")]))
     rm(predCon)
-    preds[,pred_stacked:=round(pred_stacked, 3)]
-    preds[,pred_all_pos:=round(pred_all_pos, 3)]
+    preds[,pred_stacked:=roundNonZero(pred_stacked, digits=3)]
+    preds[,pred_all_pos:=roundNonZero(pred_all_pos, digits=3)]
 
     if(context %in% trainingContexts){
         lab <- assays(mae[["ChIP"]])$peaks[,paste(context, tfName, sep="_")]
-        lab <- round(lab, 2)
+        lab <- roundNonZero(lab, digits=2)
         preds <- cbind(preds, lab)}
   
     predFilePath <- file.path(outDir,
@@ -215,13 +226,13 @@ for(context in predContexts){
   preds <- as.data.table(as.matrix(predCon[,c("pred_stacked",
                                               "pred_all_pos",
                                               "pred_stacked_binarized")]))
-  preds[,pred_stacked:=round(pred_stacked, 3)]
-  preds[,pred_all_pos:=round(pred_all_pos, 3)]
+  preds[,pred_stacked:=roundNonZero(pred_stacked, digits=3)]
+  preds[,pred_all_pos:=roundNonZero(pred_all_pos, digits=3)]
     
   rm(predCon)
   if(context %in% trainingContexts){
       lab <- assays(mae[["ChIP"]])$peaks[,paste(context, tfName, sep="_")]
-      lab <- round(lab, 2)
+      lab <- roundNonZero(lab, digits=2)
       preds <- cbind(preds, lab)}
   
   predFilePath <- file.path(outDir,

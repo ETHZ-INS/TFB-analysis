@@ -192,4 +192,5 @@ gc()
 ```{r, sessionInfo}
 print(proc.time()-ptmStart)
 print(Sys.time())
+sessionInfo()
 ```

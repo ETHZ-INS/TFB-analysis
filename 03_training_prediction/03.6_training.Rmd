@@ -554,4 +554,5 @@ file.remove(file.path(outDir, paste0(paste("feature_matrix", tfName, sep="_"), "
 ```{r, sessionInfo}
 print(proc.time()-ptmStart)
 print(Sys.time())
+sessionInfo()
 ```

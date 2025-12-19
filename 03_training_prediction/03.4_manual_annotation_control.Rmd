@@ -1,0 +1,228 @@
+---
+title: "03.4 Manual Annotation Control"
+output: html_document
+params: 
+  maePath:
+    label: "maePath"
+    value: ./mae.rds
+  metaPath:
+    label: "metaPath"
+    value: ./meta.rds
+  metaRawPath: 
+    label: "metaRaw"
+    value: ./meta_raw.rds
+  outDir: 
+    label: "outDir"
+    value: ./data
+---
+
+```{r, setup}
+suppressPackageStartupMessages({
+library(BSgenome.Hsapiens.UCSC.hg38)
+library(EnsDb.Hsapiens.v86)
+library(parallel)
+library(TFBlearner)
+library(data.table)
+library(GenomicRanges)
+library(BiocParallel)
+library(parallel)
+})
+
+seed <- params$seed
+set.seed(seed)
+```
+
+```{r, params}
+outDir <- params$outDir
+if(!dir.exists(outDir)) dir.create(outDir)
+
+mae <- readRDS(params$maePath)
+metaData <- readRDS(params$metaPath)
+metaRawData <- readRDS(params$metaRawPath)
+```
+
+```{r, find matching ids}
+contexts <- unique(metaData$context)
+contexts[order(contexts)]
+
+# most of them have already been filtered before just to double check
+matchingPairs <- list("B_Cell"=c("B_Cell", "BCells_none"),
+                      "Glutamatergic_Neuron"=c("Glutamatergic_Neuron", "GlutamatergicNeurons_none"),
+                      "GM12878"=c("GM12878", "GM12878 (female B-cells lymphoblastoid cell line)_none"),
+                      "HCT116"= c("HCT-116 (colon carcinoma)_none", "HCT116"),
+                      "HEK293"=c("HEK293 (embryonic kidney)_none", "HEK293_none", "HEK293T (embryonic kidney)_none"),
+                      "HUVEC"=c("HUVEC_none", "HUVEC-C (HUVEC, umbilical vein endothelial cells)_none"),
+                      "IMR90"=c("IMR_90", "IMR90_none"),
+                      "Keratinocyte"=c("Keratinocyte_none", "keratinocytes_none"),
+                      "MCF7"=c("MCF_7", "MCF7 (Invasive ductal breast carcinoma)_none"))
+matchingIds <- list()
+for(pair in names(matchingPairs)){
+  dupIds <- subset(metaData, context %in% matchingPairs[[pair]] | 
+                             context_name %in% matchingPairs[[pair]])$full_id
+  dupIds <- intersect(unique(sampleMap(mae)$primary), dupIds)
+  matchingIds[[pair]] <- dupIds
+}
+```
+
+```{r, define final ID}
+matchIdDt <- data.table(context=names(matchingIds),
+                        id=matchingIds)
+atacId <- lapply(matchIdDt$id, function(ids){
+  hasAtac <- intersect(ids, subset(sampleMap(mae), assay=="ATAC")$primary)
+})
+matchIdDt$has_atac <- atacId
+
+
+chipId <- lapply(matchIdDt$id, function(ids){
+  hasChIP <- intersect(ids, subset(sampleMap(mae), assay=="ChIP")$primary)
+})
+matchIdDt$has_chip <- chipId
+
+# favored prediction contexts
+matchIdDt$final_id <- c("250", "258", "102", "114", "260", 
+                        "261", "263", "269", "173")
+matchIdDt
+
+table(subset(metaRawData, context_id %in% matchIdDt$final_id)$origin_chIP)
+table(subset(metaRawData, context_id %in% matchIdDt$final_id)$origin_ATAC)
+
+idsToRemove <- setdiff(unlist(matchIdDt$id), matchIdDt$final_id)
+table(subset(metaRawData, context_id %in% idsToRemove)$origin_chIP)
+table(subset(metaRawData, context_id %in% idsToRemove)$origin_ATAC)
+```
+
+```{r, re-annotate object}
+smpDt <- as.data.table(sampleMap(mae))
+smpDt[,col_id:=1:.N, by=.(assay)]
+smpDt[, orig_colname:=colname]
+
+colDataChIP <- as.data.table(colData(mae[["ChIP"]]))
+colDataChIP$origin <- NULL
+colDataChIP[,col_id:=1:nrow(colDataChIP)]
+colDataChIP[, orig_context:=context]
+
+# rename chip
+for(i in 1:nrow(matchIdDt)){
+  finalId <- matchIdDt$final_id[i]
+  idsToRename <- setdiff(unlist(matchIdDt$id[i]), finalId)
+
+  # in assays
+  oldColName <- colDataChIP[context %in% idsToRename, ]$combination
+  newColName <- paste(finalId, unlist(tstrsplit(oldColName, split="_", keep=2)), sep="_")
+  
+  # in colData ChIP
+  colDataChIP[context %in% idsToRename, ]$combination <- newColName
+  colDataChIP[context %in% idsToRename, ]$context <- finalId
+
+  # rename in sample-map
+  oldColNames <- smpDt[primary %in% idsToRename & assay=="ChIP"]$colname
+  newColNames <- paste(finalId, unlist(tstrsplit(oldColNames, split="_", keep=2)), sep="_")
+  smpDt[primary %in% idsToRename & assay=="ChIP",]$colname <- newColNames
+  smpDt[primary %in% idsToRename & assay=="ChIP", ]$primary <- finalId
+}
+setorder(colDataChIP, col_id)
+
+colDataChIP[,n_dup:=.N, by=.(combination, context, tfName)]
+dim(colDataChIP)
+table(colDataChIP$n_dup)
+colDataChIP <- subset(colDataChIP, n_dup==1 | context==orig_context)
+dim(colDataChIP)
+
+# double check: 
+setdiff(subset(colDataChIP, context!=orig_context)$context, unlist(matchIdDt$id, recursive=TRUE))
+
+smpDt[,n_dup:=.N, by=.(colname, assay, primary)]
+smpDt <- subset(smpDt, n_dup==1 | colname==orig_colname)
+
+reChIPExp <- mae[["ChIP"]]
+reChIPExp <- reChIPExp[,colDataChIP$col_id]
+colData(reChIPExp) <- S4Vectors::DataFrame(colDataChIP, 
+                                           row.names=colDataChIP$combination)
+reChIPExp
+
+# remove deprecated contexts
+idsToRemove <- setdiff(unlist(matchIdDt$id), matchIdDt$final_id)
+smpDt <- subset(smpDt, !(primary %in% idsToRemove))
+
+# subset other assays
+cols <- lapply(experiments(mae), function(n) {
+               colnames(n)[colnames(n) %in% smpDt$colname]})
+maeSub <- subsetByColumn(mae, cols)
+expList <- experiments(maeSub)
+
+# construct updated object
+expList[["ChIP"]] <- reChIPExp
+mae2 <- MultiAssayExperiment(experiments=expList, sampleMap=smpDt)
+
+colDataMae2 <- unique(smpDt, by=c("primary", #sampleMap(mae))
+                                                "isTesting", 
+                                                "isTraining"))
+colDataMae2 <- colDataMae2[,c("primary", "isTesting", "isTraining"), with=FALSE]
+setnames(colDataMae2, "primary", "context")
+colData(mae2) <- S4Vectors::DataFrame(colDataMae2, row.names=colDataMae2$context)
+
+unique(subset(metaData, type=="test")$context)
+unique(subset(metaData, full_id %in% subset(colData(mae2), isTesting)$context)$context)
+testIds <-  unique(subset(metaData, type=="test")$full_id)
+intersect(subset(colData(mae2), isTraining)$context,  testIds)
+unique(subset(metaData, full_id %in% subset(colData(mae), isTesting)$context)$context)
+
+# Mucosa_of_Descending_Colon_Tissue, Schwann_none, Ishikawa (endometrial adenocarcinoma)_none are mislabelled as testing (match substring WA)
+misTestIds <- subset(metaData, context %in% c("Mucosa_of_Descending_Colon_Tissue", 
+                                              "Schwann_none", 
+                                              "Ishikawa (endometrial adenocarcinoma)_none"))$full_id
+misTestIds <- unique(misTestIds)
+testIds <- setdiff(testIds, misTestIds)
+
+colData(mae2)[colData(mae2)$context %in% misTestIds, ]$isTesting <- FALSE
+sampleMap(mae2)$isTesting <- TRUE
+sampleMap(mae2)[sampleMap(mae2)$primary %in% misTestIds, ]$isTesting <- FALSE
+sampleMap(mae2)[!(sampleMap(mae2)$primary %in% testIds), ]$isTesting <- FALSE
+
+matchedContexts <- intersect(colData(mae2[["ChIP"]])[["context"]], 
+                             colData(mae2[["ATAC"]])[["context"]])
+colData(mae2)[colData(mae2)$context %in% matchedContexts & 
+              !colData(mae2)$isTesting, ]$isTraining <- TRUE
+sampleMap(mae2)$isTraining <- FALSE
+sampleMap(mae2)[sampleMap(mae2)$primary %in% matchedContexts & 
+                !sampleMap(mae2)$isTesting, ]$isTraining <- TRUE
+
+unique(subset(metaData, 
+              full_id %in% subset(colData(mae2), isTesting)$context)$context)
+unique(subset(metaData, 
+              full_id %in% subset(sampleMap(mae2), isTesting)$colname)$context)
+
+reIds <- intersect(subset(colData(mae2), isTraining)$context, 
+          subset(metaData, type=="test")$full_id)
+reIds
+unique(subset(metaData, full_id %in% reIds)$context)
+
+saveRDS(mae2, file.path(outDir, "05_maeAll_conFeat_sub.rds"))
+```
+
+```{r, re-annotate metadata}
+for(i in 1:nrow(matchIdDt)){
+  metaData[,context_name:=fifelse(full_id %in% matchIdDt$id[[i]], 
+                                  matchIdDt$context[[i]], context_name)]
+  metaData[,context:=fifelse(full_id %in% matchIdDt$id[[i]], 
+                             matchIdDt$context[[i]], context)]
+  metaData[,full_id:=fifelse(full_id %in% matchIdDt$id[[i]], 
+                             matchIdDt$final_id[[i]], full_id)]
+}
+
+metaAtac <- metaData[, .(atac_path = list(unique(atac_path, na.rm=TRUE))), 
+                     by=full_id]
+metaChIP <- metaData[, .(file_path = list(unique(file_path, na.rm=TRUE))), 
+                     by=.(full_id, tf_name, context, context_name)]
+metaMerged <- merge(metaChIP, metaAtac, 
+                    by.x=c("full_id"), by.y=c("full_id"), 
+                    allow.cartesian=TRUE)
+metaMerged[,is_matched:=fifelse(!is.na(atac_path) & !is.na(file_path), 
+                                TRUE, FALSE)]
+saveRDS(metaMerged, file.path(outDir, "05_maeAll_meta.rds"))
+```
+
+
+```{r}
+sessionInfo()
+```

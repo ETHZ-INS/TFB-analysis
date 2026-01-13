@@ -1,7 +1,6 @@
 ---
-title: "03.3 Feature construction"
+title: "03.5 context-tf-feature construction"
 output: html_document
-date: '2025-21-01'
 params: 
   tfName: 
     label: "tfName"
@@ -183,9 +182,9 @@ mae <- contextTfFeatures(mae, tfName=tfName,
                          features=conTfFeats,
                          addLabels=TRUE, 
                          seed=seed,
-                         profiles=profile)
+                         insertionProfile=profile)
 gc()
-mae <- saveRDS(mae, file.path(outDir, "05_mae_conTfFeat_sub.rds"))
+mae <- saveRDS(mae, file.path(outDir, "06_mae_conTfFeat_sub.rds"))
 print(proc.time()-ptm)
 gc()
 ```
@@ -193,4 +192,5 @@ gc()
 ```{r, sessionInfo}
 print(proc.time()-ptmStart)
 print(Sys.time())
+sessionInfo()
 ```

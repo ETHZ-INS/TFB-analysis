@@ -5,13 +5,8 @@ SEED = 42
 
 rule all:
     input:
-      "data/04_maeAll_conFeat_sub.rds",
-      #"03.2_context_features.html"
-      #"data/meta_data/profileMap.tsv",
-      #"data/best_component_combination.tsv",
-      #"data/04_maeAll_conFeat_sub.rds",
-      #"data/meta/profileMap.tsv",
-      #"03.2_context_features.html"
+      "data/05_maeAll_conFeat_sub.rds",
+      "data/05_maeAll_meta.rds"
       
 rule metadata:
     input:
@@ -260,11 +255,31 @@ rule subsetting:
                                                  outDirAtac="../{params.out_dir_atac}",
                                                  outDir="../{params.out_dir}"))'
     """
-
+    
+rule manual_annotation_control:
+  input:
+    mae_object="data/04_maeAll_conFeat_sub.rds",
+    meta_object="data/01_maeAll_meta.rds",
+    meta_raw_object="data/meta_data/01_fullMetaAll.rds"
+  params:
+    out_dir="data"
+  output:
+    mae_object="{out_dir}/05_maeAll_conFeat_sub.rds",
+    meta_object="{out_dir}/05_maeAll_meta.rds"
+  shell:
+    """
+      Rscript -e 'rmarkdown::render("03_training_prediction/03.4_manual_annotation_control.Rmd",
+                                    "html_document",
+                                     params=list(maePath="../{input.mae_object}",
+                                                 metaPath="../{input.meta_object}",
+                                                 metaRawPath="../{input.meta_raw_object}",
+                                                 outDir="../{params.out_dir}"))'
+    """
+    
 '''
 rule model_component_ablations:
   input:
-    mae_object="{out_dir}/04_maeAll_conFeat_sub.rds",
+    mae_object="{out_dir}/05_maeAll_conFeat_sub.rds",
     profile_map="{out_dir}/meta_data/profileMap.tsv",
   params:
     out_dir="data",

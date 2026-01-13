@@ -1,7 +1,6 @@
 ---
-title: "03.4 Training"
+title: "03.6 Training"
 output: html_document
-date: '2025-21-01'
 params: 
   tfName: 
     label: "tfName"
@@ -132,10 +131,6 @@ if(length(trainingContexts)==1){
   featToRemove <- colnames(fm)[which(minMaxDiff==0 | is.na(minMaxDiff))]
   featToRemove <- setdiff(featToRemove, "context")
   fm <- fm[,!(colnames(fm) %in% featToRemove)]
-  saveRDS(featToRemove, file.path(outDir, "featsToRemove.rds"))
-}else{
-  featToRemove <- c()
-  saveRDS(featToRemove, file.path(outDir, "featsToRemove.rds"))
 }
 
 print(proc.time()-ptm)
@@ -559,4 +554,5 @@ file.remove(file.path(outDir, paste0(paste("feature_matrix", tfName, sep="_"), "
 ```{r, sessionInfo}
 print(proc.time()-ptmStart)
 print(Sys.time())
+sessionInfo()
 ```

@@ -1,7 +1,6 @@
 ---
-title: "03.5 Prediction"
+title: "03.7 Prediction"
 output: html_document
-date: '2025-21-01'
 params: 
   tfName: 
     label: "tfName"
@@ -24,9 +23,6 @@ params:
   modelPath:
     label: "modelPath"
     value: ""
-  featsToRemovePath:
-    label: "featsToRemovePath"
-    value: NULL
   serial:
     label: "serial"
     value: TRUE
@@ -44,6 +40,17 @@ suppressPackageStartupMessages({
   library(R.utils)
 })
 print(Sys.time())
+```
+
+```{r, rounding helper function}
+roundNonZero <- function(x, digits=3){
+  nonZeroInd <- which(x!=0)
+  signs <- sign(x)
+  xp <- round(x, digits=3)
+  xp[nonZeroInd] <- pmax(xp[nonZeroInd], 10^-digits)
+  xp <- signs*xp
+  return(xp)
+}
 ```
 
 ## Parameters
@@ -75,12 +82,6 @@ if(file.exists(profilesPath)){
 modelPath <- params$modelPath
 predContexts <- params$predContext
 print(predContexts)
-
-if(!is.null(params$featsToRemovePath)){
-  featsToRemove <- readRDS(featsToRemovePath)
-}else{
-  featsToRemove <- NULL
-}
 
 outDir <- params$outDir
 if(!dir.exists(outDir)) dir.create(outDir)
@@ -136,7 +137,6 @@ for(i in seq(1,length(predContexts), batchSize)){
                                     colSel=context, 
                                     addLabels=FALSE,
                                     saveHdf5=FALSE)
-    fmPred <- fmPred[,!(colnames(fmPred) %in% featsToRemove)]
     return(fmPred)},  
     BPPARAM=MulticoreParam(workers=batchSize, timeout=300, force.GC=TRUE))
   print(proc.time()-ptm3)
@@ -154,12 +154,12 @@ for(i in seq(1,length(predContexts), batchSize)){
                                                 "pred_all_pos",
                                                 "pred_stacked_binarized")]))
     rm(predCon)
-    preds[,pred_stacked:=round(pred_stacked, 3)]
-    preds[,pred_all_pos:=round(pred_all_pos, 3)]
+    preds[,pred_stacked:=roundNonZero(pred_stacked, digits=3)]
+    preds[,pred_all_pos:=roundNonZero(pred_all_pos, digits=3)]
 
     if(context %in% trainingContexts){
         lab <- assays(mae[["ChIP"]])$peaks[,paste(context, tfName, sep="_")]
-        lab <- round(lab, 2)
+        lab <- roundNonZero(lab, digits=2)
         preds <- cbind(preds, lab)}
   
     predFilePath <- file.path(outDir,
@@ -202,7 +202,6 @@ for(context in predContexts){
                                   addLabels=FALSE,
                                   saveHdf5=FALSE)
   experiments(mae)$contextTfFeat <- NULL
-  fmPred <- fmPred[,!(colnames(fmPred) %in% featsToRemove)]
   print(proc.time()-ptm)
   
   gc()
@@ -217,13 +216,13 @@ for(context in predContexts){
   preds <- as.data.table(as.matrix(predCon[,c("pred_stacked",
                                               "pred_all_pos",
                                               "pred_stacked_binarized")]))
-  preds[,pred_stacked:=round(pred_stacked, 3)]
-  preds[,pred_all_pos:=round(pred_all_pos, 3)]
+  preds[,pred_stacked:=roundNonZero(pred_stacked, digits=3)]
+  preds[,pred_all_pos:=roundNonZero(pred_all_pos, digits=3)]
     
   rm(predCon)
   if(context %in% trainingContexts){
       lab <- assays(mae[["ChIP"]])$peaks[,paste(context, tfName, sep="_")]
-      lab <- round(lab, 2)
+      lab <- roundNonZero(lab, digits=2)
       preds <- cbind(preds, lab)}
   
   predFilePath <- file.path(outDir,

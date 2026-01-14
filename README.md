@@ -11,12 +11,12 @@ Data including the following can be accessed from: 10.5281/zenodo.18198234
 * Generated TF-Binding predictions: 
 
 * The [MultiAssayExperiment](https://www.bioconductor.org/packages/release/bioc/html/MultiAssayExperiment.html) object based on which
-all models were trained and predictions were generated is provided at:
+all models were trained and predictions were generated
 
-* Pretrained models can be obtained from: 
+* Pretrained models
 
-* Precomputed insertion/footprint profiles are collected at: 
+* Precomputed insertion/footprint profiles
 
-* All raw data used can be found at: 
+* All raw data used
 
 Further data is visualized under: https://www.ethz-ins.org/TFBPlatform/

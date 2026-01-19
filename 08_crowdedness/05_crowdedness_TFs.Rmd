@@ -1,0 +1,217 @@
+---
+title: "06_crowdedness_TFs"
+output: html_document
+---
+
+
+```{r setup}
+suppressPackageStartupMessages({
+  library(MultiAssayExperiment)
+  library(ggplot2)
+  library(Matrix)
+  library(BiocParallel)
+  library(ComplexHeatmap)
+  library(sechm)
+  library(patchwork)
+  library(cowplot)
+  library(edgeR)
+  library(glmnet)
+  library(data.table)
+})
+source("../utils/load_all.R", chdir=TRUE)
+setDTthreads(6)
+```
+
+## TFs associated with crowdedness
+
+```{r}
+mae <- readRDS("../data/05_maeAll_conFeat_sub.rds")
+chip <- experiments(mae)$ChIP
+# Cvalue <- TFBlearner:::.getCrowdedness(TFBlearner:::.convertToMatrix(assay(experiments(mae)$ChIP)))
+# Cvalue <- Cvalue[,1]
+# saveRDS(Cvalue, "Cscore.rds")
+Cvalue <- readRDS("Cscore.rds")
+
+# subset to context with >=100 TFs chipped:
+contextFreq <- sort(table(chip$context), decreasing=TRUE)
+topContexts <- names(contextFreq)[contextFreq>=100]
+chip <- chip[,chip$context %in% topContexts]
+assay(chip) <- as(assay(chip), "sparseMatrix")
+
+crwd <- readRDS("crowdedness_per_context.rds")
+cn <- setNames(colnames(crwd), attr(crwd, "ids"))
+chip$context2 <- cn[as.character(chip$context)]
+crwd2 <- 200*t(t(crwd)/attr(crwd, "nTFs"))/pmax(100L,width(chip))
+```
+
+
+```{r, eval=TRUE}
+d <- dplyr::bind_rows(lapply(setNames(cn,cn), \(n){
+  i <- which(chip$context2==n)
+  j <- which(crwd2[,n]>0)
+  tmp <- as.matrix(assay(chip)[j,i])
+  tmp[tmp<0] <- NA_real_
+  tmp2 <- crwd2[j,n]
+  cc <- cor(tmp, tmp2, use="pairwise")
+  tmp[is.na(tmp)] <- 0
+  tmp2 <- tmp2>=0.4
+  prop <- as.numeric(crossprod(tmp, as.matrix(tmp2))/sum(tmp2))
+  rm(tmp)
+  gc()
+  data.frame(tf=chip$tfName[i], cor=as.numeric(cc[,1]), prop=prop)
+}), .id="celltype")
+
+m <- reshape2::dcast(d, tf~celltype, value.var="cor")
+row.names(m) <- m[,1]
+m <- as.matrix(m[,-1])
+m2 <- reshape2::dcast(d, tf~celltype, value.var="prop")
+row.names(m2) <- m2[,1]
+m2 <- as.matrix(m2[,-1])
+
+se <- SummarizedExperiment(assay=list(cor=m, prop=m2))
+anno <- readRDS("../08_meta/TF_annotation.rds")
+rowData(se) <- anno[row.names(se),]
+se <- se[names(sort(rowMeans(m, na.rm=TRUE))),]
+saveRDS(se, "TFs_cor_with_crowdedness.rds")
+```
+
+
+```{r, fig.width=10, fig.height=4}
+se <- readRDS("TFs_cor_with_crowdedness.rds")
+rowData(se)$pc.disorder <- anno[row.names(se), "pc.disorder"]
+rowData(se)$tot.dis.residues <- anno[row.names(se), "tot.dis.residues"]
+se <- se[rowSums(is.na(assay(se)))<=2,]
+
+se2 <- SummarizedExperiment(list(cor=t(assay(se)), prop=t(assay(se, "prop"))), colData=rowData(se))
+sechm(se2, row.names(se2), sortRowsOn = NULL, cluster_rows = FALSE, breaks=TRUE,
+      show_colnames = TRUE, show_rownames = TRUE, top_annotation = c("customClass"), column_names_gp=gpar(fontsize=9)) %v%
+  sechm(se2, row.names(se2), assayName = "prop", sortRowsOn = NULL, cluster_rows = FALSE, breaks=TRUE,
+      show_colnames = TRUE, show_rownames = TRUE, hmcols=viridis::viridis(101), column_names_gp=gpar(fontsize=9))
+
+sel <- c(25,25)
+crowdedTFs <- c(head(row.names(se),sel[1]), tail(row.names(se),sel[2]))
+
+se3 <- se2[,crowdedTFs]
+colData(se3)$type <- factor(rep(c("Least correlated with crowdedness", "Most correlated with crowdedness"), sel))
+sechm(se3, row.names(se2), gaps_at="type", sortRowsOn = NULL, cluster_rows = FALSE, breaks=1, 
+      show_colnames = TRUE, show_rownames = TRUE, column_names_gp=gpar(fontsize=10), row_title_gp=gpar(fontsize=12), row_title="Pearson cor\nwith crowdedness") %v%
+  sechm(se3, row.names(se2), gaps_at="type", assayName = "prop", sortRowsOn = NULL, cluster_rows = FALSE, row_title_gp=gpar(fontsize=12), 
+      show_colnames = TRUE, show_rownames = TRUE, hmcols=viridis::viridis(101), column_names_gp=gpar(fontsize=10), row_title="Proportion of highly-\ncrowded regions")
+```
+
+
+
+```{r}
+anno <- readRDS("../08_meta/TF_annotation.rds")
+mo <- readRDS("motifScores_in_crowded_vs_bound_V3.rds")
+mo$prop <- mo$mean/mo$TF.maxMotifScore
+mo2 <- reshape2::dcast(mo, TF~set, value.var="prop", fun.aggregate = mean)
+mo2 <- merge(mo2, anno, by="TF")
+crwdCor <- readRDS("TFs_cor_with_crowdedness.rds")
+mo2$corWithCrwd <- rowMeans(assay(crwdCor), na.rm=TRUE)[mo2$TF]
+
+mo2 <- mo2[which(mo2$nonCrwdBound>0),]
+mo2$enr.Cscore <- mo2$auc_Cscore/mo2$pos_frac
+mo2 <- mo2[,c("meanDistToTSS", "crwdBound", "nonCrwdBound", "enr.Cscore", "TF")]
+saveRDS(mo2, file="motifDiff_vs_dist2TSS.rds")
+cortest <- with(mo2, cor.test(log10(meanDistToTSS), (pmax(0,crwdBound)-pmax(0,nonCrwdBound)), use="pairwise"))
+corp <- paste0("Correlation p=",format(cortest$p.value, digit=2))
+ggplot(mo2, aes(log10(meanDistToTSS), (pmax(0,crwdBound)-pmax(0,nonCrwdBound)), color=enr.Cscore)) + geom_point() +
+  geom_smooth(method="lm") + theme_sleek() + annotate("text", x=Inf, y=Inf, hjust=1, vjust=1, label=corp) +
+  labs(x="log10(mean distance to TSS)", color="Predictivity\nof C-score\n(fold-\nenrichment)",
+       y="Crowded - non-crowded\ndifference in motif matching score") + scale_color_viridis_c(trans="log2")
+```
+
+
+
+
+
+
+# Predicting crowdedness
+
+```{r}
+atac <- experiments(mae)$ATAC
+atac <- atac[,which(colnames(atac) %in% topContexts)]
+assays(atac) <- assays(atac)["total.overlaps"]
+assay(atac) <- as(assay(atac), "sparseMatrix")
+row.names(atac) <- row.names(crwd)
+assay(atac, "cpm") <- cpm(calcNormFactors(DGEList(as.matrix(assay(atac)))))
+cn <- setNames(sapply(strsplit(unlist(atac$origin),"/",fixed=TRUE), \(x) x[2]), atac$context)
+colnames(atac) <- cn[colnames(atac)]
+crwd2 <- t(t(crwd)/attr(crwd, "nTFs"))
+chip2 <- chip[,which(chip$tfName %in% crowdedTFs)]
+
+d <- dplyr::bind_rows(lapply(setNames(cn, cn), \(n){
+  w <- which(crwd2[,n]>0)
+  a <- assay(atac, "cpm")[w,n]
+  chip3 <- as.matrix(assay(chip2)[w,which(chip2$context2==n),drop=FALSE])
+  chip3[chip3<0] <- NA_real_
+  data.frame(region=w, atac=a, crwd=crwd2[w,n], crwdC=crwd[w,n], nChIP=rowSums(chip3>0.1, na.rm=TRUE), meanChIP=rowMeans(chip3, na.rm=TRUE),
+             medianChIP=matrixStats::rowMedians(chip3, na.rm=TRUE))
+}), .id="celltype")
+# ggplot(d[d$atac>0.1,], aes(crwd, log10(0.1+atac)*meanChIP+nChIP/15)) + geom_hex() + facet_wrap(~celltype, scale="free_y") +
+#   scale_fill_continuous(trans="log") + theme_bw()
+
+d <- d[d$celltype!="HEK293",]
+d$logATAC <- log10(0.1+d$atac)
+d$pChIP <- d$nChIP/15
+
+# mod2 <- cv.glmnet(as.matrix(d[,c("logATAC","meanChIP","pChIP","medianChIP")]), d$crwd, foldid = as.integer(factor(d$celltype)))
+# d$pred2 <- predict(mod2, newx = as.matrix(d[,c("logATAC","meanChIP","pChIP","medianChIP")]))
+
+# ggplot(d[d$atac>0.1,], aes(pred2, crwd)) + geom_hex() + facet_wrap(~celltype, scale="free_y") +
+#   scale_fill_continuous(trans="log") + theme_bw()
+# ggplot(d[d$atac>0.1,], aes(log10(0.1+atac)*meanChIP+pChIP, crwd)) + geom_hex() + facet_wrap(~celltype, scale="free_y") +
+#   scale_fill_continuous(trans="log") + theme_bw()
+ggplot(d[d$atac>0.1,], aes(meanChIP^2+pChIP, crwd)) + geom_hex() + facet_wrap(~celltype, scale="free_y") +
+  scale_fill_continuous(trans="log") + theme_bw()
+```
+
+
+
+```{r}
+d2 <- lapply((setNames(cn, cn)[unique(d$celltype)]), \(n){
+  print(n)
+  dk <- d[d$celltype==n,]
+  if(nrow(dk)==0) return(NULL)
+  preds <- readRDS(paste0("../09_DTFA/preds_",n,".rds"))
+  if(nrow(preds)==0) return(NULL)
+  predsI <- preds[dk$region,]
+  dk$p9 <- rowMeans(predsI>0.9)
+  dk$p98 <- rowMeans(predsI>0.98)
+  cTF <- intersect(colnames(preds), crowdedTFs)
+  dk$cTFmean <- rowMeans(predsI[,cTF]^2)
+  dk$cTF98 <- rowMeans(predsI[,cTF]>0.98)
+  dk
+})
+d2 <- dplyr::bind_rows(d2[!sapply(d2,is.null)])
+d2$Cscore <- Cvalue[d2$region]
+
+f <- c("p9", "p98", "cTF98", "cTFmean")
+mod3 <- cv.glmnet(as.matrix(d2[,f]), d2$crwd, foldid = as.integer(as.factor(d2$celltype)))
+d2$pred3 <- predict(mod3, newx = as.matrix(d2[,f]))
+(ggplot(d2, aes(pred3, crwd)) + geom_hex() + facet_wrap(~celltype, scale="free_y") +
+  scale_fill_continuous(trans="log") + theme_bw()) /
+  (ggplot(d2, aes(cTFmean*p98+p98, crwd)) + geom_hex() + facet_wrap(~celltype, scale="free_y") +
+  scale_fill_continuous(trans="log") + theme_bw() + plot_layout(guides="collect")) +
+  (ggplot(d2, aes(Cscore, crwd)) + geom_hex() + facet_wrap(~celltype, scale="free_y") +
+  scale_fill_continuous(trans="log") + theme_bw() + plot_layout(guides="collect"))
+  
+```
+
+Validation in unseen celltype:
+
+```{r}
+ESC.crwd <- rowSums(assay(experiments(mae)$ChIP)[,experiments(mae)$ChIP$context==54]>0.1)
+ESC.preds <- readRDS("../09_DTFA/preds_mouseESC.rds")
+cTF <- intersect(colnames(ESC.preds), crowdedTFs)
+desc <- data.frame(crwd=ESC.crwd, p98=rowMeans(ESC.preds>0.98), cTFmean=rowMeans(ESC.preds[,cTF]^2),
+                   Cscore=Cvalue)
+
+(ggplot(desc, aes(Cscore, crwd)) + geom_hex() + 
+  scale_fill_continuous(trans="log") + theme_bw()) +
+   (ggplot(desc, aes(cTFmean*p98+p98, crwd)) + geom_hex() + 
+  scale_fill_continuous(trans="log") + theme_bw()) + plot_layout(guides="collect")
+```
+
+Except for inactive regions it's not working much better than a generic C-score...

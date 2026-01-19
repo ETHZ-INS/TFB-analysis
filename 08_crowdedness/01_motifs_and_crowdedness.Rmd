@@ -1,0 +1,135 @@
+---
+title: "motifs_and_crowdedness"
+output: html_document
+date: "2025-11-07"
+author: "Pierre-Luc Germain"
+---
+
+```{r}
+suppressPackageStartupMessages({
+  library(MultiAssayExperiment)
+  library(ggplot2)
+  library(Matrix)
+  library(BiocParallel)
+  library(ComplexHeatmap)
+  library(sechm)
+  library(patchwork)
+  library(cowplot)
+})
+source("../utils/load_all.R", chdir=TRUE)
+```
+
+```{r}
+mae <- readRDS("../data/05_maeAll_conFeat_sub.rds")
+chip <- experiments(mae)$ChIP
+
+# subset to context with >=100 TFs chipped:
+contextFreq <- sort(table(chip$context), decreasing=TRUE)
+topContexts <- names(contextFreq)[contextFreq>=100]
+chip <- chip[,chip$context %in% topContexts]
+assay(chip) <- as(assay(chip), "sparseMatrix")
+saveRDS(contextFreq, file="nTFsPerContext.rds")
+
+atac <- experiments(mae)$ATAC
+atac <- atac[,which(colnames(atac) %in% topContexts)]
+assays(atac) <- assays(atac)["total.overlaps"]
+assay(atac) <- as(assay(atac), "sparseMatrix")
+cn <- setNames(sapply(strsplit(unlist(atac$origin),"/",fixed=TRUE), \(x) x[2]), atac$context)
+cntchipN <- setNames(as.numeric(table(chip$context)), cn)
+
+chip$context2 <- cn[chip$context]
+saveRDS(chip, "chip_cellLines.SE.rds")
+
+motifs <- experiments(mae)$Motifs
+```
+
+
+# Relationship between crowdedness and accessibility
+
+```{r, eval=FALSE}
+dat1 <- dplyr::bind_rows(lapply(setNames(topContexts,topContexts), \(ct){
+  a <- assay(atac)[,ct]
+  ch <- assay(chip)[,chip$context==ct]
+  ch@x[ch@x<0 | (ch@x>0 & ch@x<0.1)] <- NA
+  colnames(ch) <- gsub(".+_","",colnames(ch))
+  crwd <- rowSums(ch>0, na.rm=TRUE)
+  w <- which(a>1 & crwd >1)
+  data.frame(ATAC=a, crwd=crwd, width=width(atac))[w,]
+}), .id="context")
+saveRDS(dat1, file="crowdedness_vs_ATAC.rds")
+```
+
+
+# Motif scores in different sets
+
+In each context, compute crowdedness; define crowded as >=50 TFs & 40% of 
+profiled TFs, and non-crowded as < 20TFs.
+Then for each TF, get the motif matching score (median, mean and SD) of crowded,
+non-crowded, and all peaks, as well as all unbound regions.
+
+```{r, eval=TRUE}
+regW <- width(atac)
+dat2 <- dplyr::bind_rows(lapply(setNames(topContexts,topContexts), \(ct){
+  print(ct)
+  a <- 200*assay(atac)[,ct]/pmax(200L,regW)
+  ch <- assay(chip)[,chip$context==ct]
+  ch@x[ch@x<0 | (ch@x>0 & ch@x<0.1)] <- NA
+  colnames(ch) <- gsub(".+_","",colnames(ch))
+  crwd <- rowSums(ch>0, na.rm=TRUE)
+  crwd2 <- 200*crwd/pmax(100L,regW)
+  ch <- ch[,intersect(colnames(ch), colnames(motifs))]
+  wCrwd <- which(crwd2>=40)
+  wNotCrwd <- which(crwd<20)
+  
+  bg <- getBackgroundSet(setNames(a[wNotCrwd], wNotCrwd), a[wCrwd], sameSizeBg = FALSE)
+  
+  res <- bplapply(setNames(colnames(ch), colnames(ch)),
+                                   BPPARAM=MulticoreParam(30, progress=FALSE), FUN=\(x){
+    mo <- assay(motifs)[,x]/10000
+    wBound <- which(ch[,x]>0)
+    if(length(wBound)<2000) return(NULL)
+    tryCatch({
+      ll <- list(
+        crwdBound=mo[intersect(wBound, wCrwd)],
+        nonCrwdBound=mo[intersect(wBound, wNotCrwd)],
+        allBound=mo[wBound],
+        allUnbound=mo[-wBound],
+        matchedUnbound=mo[as.integer(bg)],
+        bound.crowdedness=crwd[wBound],
+        bound.atac=log1p(a[wBound])
+      )
+      dplyr::bind_rows(lapply(ll, \(x) data.frame(mean=mean(x), median=median(x), sd=sd(x), n=length(x))),.id="set")
+    }, error=function(e) NULL)
+  })
+  table(resIsNull <- sapply(res, is.null))
+  gc()
+  dplyr::bind_rows(res[!resIsNull], .id="TF")
+}), .id="context")
+names(allTFs) <- allTFs <- intersect(chip$tfName, colnames(motifs))
+TFmax <- pbapply::pbsapply(allTFs, \(x) max(assay(motifs)[,x]))
+dat2$TF.maxMotifScore <- TFmax[dat2$TF]/10000
+
+db <- dat2[grep("atac|crowdedness", dat2$set), c("context", "TF", "set","mean")]
+db <- reshape::cast(db, context+TF~set, value = "mean")
+m <- merge(dat2[grep("atac|crowdedness", dat2$set, invert=TRUE),], db, by=c("context","TF"))
+m$set <- factor(m$set, unique(m$set))
+saveRDS(m, file="motifScores_in_crowded_vs_bound_V3.rds")
+```
+
+```{r}
+w <- which(chip$tfName %in% colnames(motifs))
+context.crwd <- sapply(split(seq_len(ncol(chip)), chip$context), \(x){
+  rowSums(assay(chip)[,intersect(x,w)]>0.1)
+})
+
+# rename columns to actual cell line names
+cn <- setNames(sapply(strsplit(unlist(atac$origin),"/",fixed=TRUE), \(x) x[2]), atac$context)
+oldIDs <- colnames(context.crwd)
+colnames(context.crwd) <- cn[colnames(context.crwd)]
+
+cntchipN <- setNames(as.numeric(table(chip$context[w])), cn)
+attr(context.crwd, "nTFs") <- cntchipN[colnames(context.crwd)]
+attr(context.crwd, "ids") <- oldIDs
+row.names(context.crwd) <- as.character(rowRanges(chip))
+saveRDS(context.crwd, file="crowdedness_per_context.rds")
+```

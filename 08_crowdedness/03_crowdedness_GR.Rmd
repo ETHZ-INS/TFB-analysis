@@ -1,0 +1,325 @@
+---
+title: "Crowdedness - example of GR data"
+output: html_document
+date: "2025-11-07"
+author: "Pierre-Luc Germain"
+---
+
+```{r}
+suppressPackageStartupMessages({
+  library(MultiAssayExperiment)
+  library(ggplot2)
+  library(Matrix)
+  library(sechm)
+  library(patchwork)
+  library(cowplot)
+  library(edgeR)
+})
+source("../utils/load_all.R", chdir=TRUE)
+```
+
+
+```{r}
+mae <- readRDS("../data/05_maeAll_conFeat_sub.rds")
+atac2 <- colData(experiments(mae)$ATAC)
+atac2 <- atac2[lengths(atac2$origin)==1,]
+atac2$name <- sapply(strsplit(unlist(atac2$origin),"/",fixed=TRUE), \(x) x[2])
+a549con <- head(atac2$context[which("A549"==atac2$name)],1)
+ch <- assay(experiments(mae)$ChIP)[,which(experiments(mae)$ChIP$context==a549con)]
+a549.crowdedness <- 200*rowSums(as(ch, "sparseMatrix")>0.1)/pmax(100L,width(experiments(mae)$ATAC))
+```
+
+
+```{r}
+reddy <- readRDS("/mnt/gapp/externData/Reddy_GR_ATAC_K27ac_Dnase/plg/grPeaks.resized.SE.rds")
+o <- findOverlaps(reddy, rowRanges(experiments(mae)$ATAC))
+o <- splitAsList(to(o), from(o))
+o.n <- max(relist(a549.crowdedness[unlist(o)], o))
+rowData(reddy)$crowdedness <- NA_integer_
+rowData(reddy)$crowdedness[as.integer(names(o.n))] <- o.n
+
+rowData(reddy)$crowdset <- factor((rowData(reddy)$crowdedness>=25) - (rowData(reddy)$crowdedness<15), c(-1,0,1), c("not crowded", "midrange", "crowded"))
+
+nf <- readRDS("/mnt/gapp/externData/Reddy_GR_ATAC_K27ac_Dnase/plg/counts.SE.rds")$nf
+se3 <- reddy
+se3$nf <- nf
+```
+
+
+```{r}
+assays(se3)$logcpm.bg <- log1p(edgeR::cpm(DGEList(assay(se3), lib.size = rep(1e7,ncol(se3)), norm.factors = (se3$nf/exp(mean(log(se3$nf)))))))
+assays(se3)$logcpm <- log1p(edgeR::cpm(DGEList(assay(se3))))
+se3 <- se3[,colnames(se3)!="H3K27ac_0h.2"]
+metadata(se3)$default_view <- list(top_annotation="time")
+se3 <- log2FC(se3, "logcpm.bg", se3$time=="0h", by = se3$signal)
+
+sechm(se3, row.names(se3)[which(seqnames(se3)=="chr1")], gaps_at="signal", gaps_row = "crowdset", breaks=0.9995, row_title_rot=0)
+
+# se3 <- log2FC(se3, "logcpm.depth", se3$time=="0h", by = se3$signal)
+# sechm(se3, row.names(se3)[which(seqnames(se3)=="chr1")], gaps_at="signal", gaps_row = "crowdset", breaks=0.9995)
+
+rowData(se3)$baseline.ATAC <- rowMeans(assay(se3, "logcpm.bg")[,which(se3$signal=="ATACseq" & se3$time=="0h")])
+rowData(se3)$baseline.K27 <- rowMeans(assay(se3, "logcpm.bg")[,which(se3$signal=="H3K27ac" & se3$time=="0h")])
+
+w <- which(rowData(se3)$crowdset=="not crowded")
+spw <- split(seq_len(nrow(se3)), rowData(se3)$crowdset)
+set.seed(123)
+bgATAC.nC <- getBackgroundSet(rowData(se3)$baseline.ATAC[spw$`not crowded`], 
+                           rowData(se3)$baseline.ATAC[spw$crowded], sameSizeBg = FALSE)
+bgATAC.mid <- getBackgroundSet(rowData(se3)$baseline.ATAC[spw$midrange], 
+                           rowData(se3)$baseline.ATAC[spw$crowded], sameSizeBg = FALSE)
+seA <- readRDS("/mnt/gapp/externData/Reddy_GR_ATAC_K27ac_Dnase/plg/atacPeaks.SE.rds") # using time=0 peaks
+seA$time  <- gsub("_.+","",gsub("ATACseq_","",colnames(seA)))
+seA$nf <- nf[1:12]
+row.names(seA) <- as.character(granges(seA))
+assays(seA)$logcpm.bg <- log1p(edgeR::cpm(DGEList(assay(seA), lib.size=rep(1e7,ncol(seA)), norm.factors = (seA$nf/exp(mean(log(seA$nf)))))))
+assays(seA)$logcpm <- log1p(edgeR::cpm(DGEList(assay(seA))))
+rowData(seA)$baseline.ATAC <- rowMeans(assay(seA, "logcpm.bg")[,which(seA$time=="0h")])
+seA <- log2FC(seA, "logcpm.bg", seA$time=="0h")
+seA$signal <- "ATACseq"
+set.seed(123)
+bgATAC.unbound <- getBackgroundSet(rowData(seA)$baseline.ATAC[!overlapsAny(seA, reddy)], 
+                           rowData(se3)$baseline.ATAC[spw$crowded], sameSizeBg = FALSE)
+
+subsets <- c(row.names(se3)[spw$crowded], bgATAC.mid, bgATAC.nC)
+
+d <- meltSE(se3, subsets)
+d2 <- meltSE(seA, bgATAC.unbound)
+d2$crowdset <- "unbound"
+f <- intersect(colnames(d2),colnames(d))
+d <- rbind(d[,f], d2[,f])
+ag <- aggregate(d[,c("logcpm.bg","log2FC")], by=d[,c("sample","time","signal","crowdset")], FUN=mean)
+
+saveRDS(ag[which(ag$signal != "H3K27ac" & ag$time!="4h"),], file="crowdedness_GR.rds")
+
+ggplot(ag, aes(crowdset, log2FC, color=time, fill=time)) + geom_boxplot(outliers = FALSE) + facet_wrap(~signal, scale="free_y") + theme_bw()
+```
+
+## RNA-seq
+
+```{r}
+se <- readRDS("/mnt/gapp/externData/Reddy_GR_ATAC_K27ac_Dnase/RNAseq/SE.rds")
+se <- se[edgeR::filterByExpr(assay(se), model.matrix(~se$timePoint), min.count=20),]
+rowRanges(se) <- promoters(rowRanges(se), upstream = 5000, downstream = 0)
+assay(se,"logcpm") <- log1p(edgeR::cpm(calcNormFactors(DGEList(assay(se)))))
+
+cc1 <- cor(assay(se,"logcpm"))
+se$batch <- as.factor(cutree(hclust(as.dist(1-cc1)), k=2))
+assay(se,"corrected") <- sva::ComBat(assay(se, "logcpm"), batch=se$batch, mod = model.matrix(~se$timePoint))
+se <- sechm::log2FC(se, "corrected", se$timePoint=="0min")
+
+o <- findOverlaps(se, rowRanges(experiments(mae)$ATAC))
+o <- splitAsList(to(o), from(o))
+o.n <- max(relist(a549.crowdedness[unlist(o)], o))
+rowData(se)$crowdedness <- NA_integer_
+rowData(se)$crowdedness[as.integer(names(o.n))] <- o.n
+rowData(se)$crowdset <- factor((rowData(se)$crowdedness>=25) - (rowData(se)$crowdedness<15), c(-1,0,1,2), c("not crowded", "midrange", "crowded", "unbound"))
+rowData(se)$crowdset[!overlapsAny(se,reddy)] <- "unbound"
+
+rowData(se)$corrected <- rowMeans(assay(se, "corrected"))
+
+seBound <- se[overlapsAny(se, reddy),]
+table(rowData(seBound)$crowdset)
+
+spw <- split(row.names(seBound), rowData(seBound)$crowdset)
+
+set.seed(123)
+bg.nC <- getBackgroundSet(rowData(seBound)$corrected[spw$`not crowded`], 
+                           rowData(seBound)$corrected[spw$crowded], sameSizeBg = FALSE)
+bg.mid <- getBackgroundSet(rowData(seBound)$corrected[spw$midrange], 
+                           rowData(seBound)$corrected[spw$crowded], sameSizeBg = FALSE)
+bg.unbound <- getBackgroundSet(rowData(se)$corrected[which(rowData(se)$crowdset=="unbound")], 
+                           rowData(seBound)$corrected[spw$crowded], sameSizeBg = FALSE)
+subsets <- c(spw$crowded, bg.mid, bg.nC, bg.unbound)
+
+
+
+d <- meltSE(se, subsets)
+ggplot(d, aes(timePoint, log2FC, group=sample)) + stat_summary() + theme_bw() + facet_wrap(~crowdset)
+
+ag <- aggregate(d[,c("log2FC","scaledLFC")], by=d[,c("sample","timePoint","crowdset")], FUN=\(x) mean(x))
+p1 <- ggplot(ag, aes(crowdset, log2FC, color=timePoint, fill=timePoint)) + geom_boxplot(outliers = FALSE) + theme_bw() + ylab("log2FC")
+```
+
+
+```{r, eval=FALSE}
+dds <- calcNormFactors(DGEList(assay(se)))
+mm <- model.matrix(~SV1+SV2+SV3+SV4+SV5+timePoint, data=as.data.frame(colData(se)))
+dds <- estimateDisp(dds,mm)
+fit <- glmFit(dds, mm)
+names(coefs) <- coefs <- grep("timePoint",colnames(mm),value=TRUE)
+deas <- lapply(coefs, \(x){
+  as.data.frame(topTags(glmLRT(fit, x), Inf, sort.by = "none"))
+})
+deaEarly <- as.data.frame(topTags(glmLRT(fit, head(coefs,5)), Inf))
+
+alldegs <- table(unlist(lapply(deas[1:6], \(x) row.names(x)[abs(x$logFC)>log2(1.1) & x$FDR<0.25])))
+degs2 <- unique(names(alldegs)[alldegs>1])
+ll <- list(notCrowded=bg.nC, midrange=bg.mid, crowded=spw$crowded, unbound=bg.unbound)
+sapply(, \(x){
+  
+})
+degs <- sapply(deas, \(x){
+  x <- x[abs(x$logFC)>log2(1.1) & x$FDR<0.25,]
+  c(up=sum(x$logFC>0), down=sum(x$logFC<0))
+})
+```
+
+
+Crowded promoters upregulated very early include Dusp1 and ZFP36
+
+
+Unspliced:
+
+```{r}
+se <- readRDS("/mnt/gapp/externData/Reddy_GR_ATAC_K27ac_Dnase/RNAseq2/SE.split.rds")
+tmp <- read.delim("/mnt/gapp/externData/Reddy_GR_ATAC_K27ac_Dnase/RNAseq2/unspliced.tmp.counts", skip=1)
+rowRanges(se) <- GRanges(gsub(";.+","",tmp$Chr), strand=gsub(";.+","",tmp$Strand),
+                         IRanges(sapply(strsplit(tmp$Start,";"),\(x) min(as.integer(x))),
+                                  sapply(strsplit(tmp$End,";"),\(x) max(as.integer(x)))))
+row.names(se) <- tmp$Geneid
+assays(se) <- assays(se)["unspliced"]
+m <- read.delim("/mnt/gapp/externData/Reddy_GR_ATAC_K27ac_Dnase/RNAseq2/metadata.csv", row.names = 1)
+se$time <- m[gsub("\\.bam$","",colnames(se)),"Biosample.treatments.duration"]
+se$time <- gsub("\\.0 minute","min",gsub(" hour","h",se$time))
+se$timePoint <- factor(se$time, c("","5min","10min","15min","20min","25min","0.5h","1h","2h","3h","4h"))
+levels(se$timePoint)[1] <- "0min"
+se <- se[,!is.na(se$timePoint) & colSums(assay(se))>1000000]
+
+se <- se[edgeR::filterByExpr(assay(se), model.matrix(~se$timePoint), min.count=20),]
+rowRanges(se) <- promoters(rowRanges(se), upstream = 5000, downstream = 0)
+assay(se,"logcpm") <- log1p(edgeR::cpm(calcNormFactors(DGEList(assay(se)))))
+
+cc2 <- cor(assay(se,"logcpm"))
+se$batch <- as.factor(cutree(hclust(as.dist(1-cc2)), k=2))
+assay(se,"corrected") <- sva::ComBat(assay(se, "logcpm"), batch=se$batch, mod = model.matrix(~se$timePoint))
+se <- sechm::log2FC(se, "corrected", se$timePoint=="0min")
+
+o <- findOverlaps(se, rowRanges(experiments(mae)$ATAC))
+o <- splitAsList(to(o), from(o))
+o.n <- max(relist(a549.crowdedness[unlist(o)], o))
+rowData(se)$crowdedness <- NA_integer_
+rowData(se)$crowdedness[as.integer(names(o.n))] <- o.n
+rowData(se)$crowdset <- factor((rowData(se)$crowdedness>=25) - (rowData(se)$crowdedness<15), c(-1,0,1,2), c("not crowded", "midrange", "crowded", "unbound"))
+rowData(se)$crowdset[!overlapsAny(se,reddy)] <- "unbound"
+
+rowData(se)$corrected <- rowMeans(assay(se, "corrected"))
+
+seBound <- se[overlapsAny(se, reddy),]
+table(rowData(seBound)$crowdset)
+
+spw <- split(row.names(seBound), rowData(seBound)$crowdset)
+
+set.seed(123)
+bg.nC <- getBackgroundSet(rowData(seBound)$corrected[spw$`not crowded`], 
+                           rowData(seBound)$corrected[spw$crowded], sameSizeBg = FALSE)
+bg.mid <- getBackgroundSet(rowData(seBound)$corrected[spw$midrange], 
+                           rowData(seBound)$corrected[spw$crowded], sameSizeBg = FALSE)
+bg.unbound <- getBackgroundSet(rowData(se)$corrected[which(rowData(se)$crowdset=="unbound")], 
+                           rowData(seBound)$corrected[spw$crowded], sameSizeBg = FALSE)
+subsets <- c(spw$crowded, bg.mid, bg.nC, bg.unbound)
+
+
+
+d2 <- meltSE(se, subsets)
+d$type <- "Full transcriptome"
+d2$type <- "Unspliced RNA"
+i <- intersect(colnames(d), colnames(d2))
+d3 <- rbind(d[which(d$timePoint %in% levels(d2$timePoint)),i],d2[,i])
+saveRDS(d3, file="crowdedness_GR_rna.rds")
+
+d3 <- readRDS("crowdedness_GR_rna.rds")
+
+ag <- aggregate(d3[,c("log2FC","scaledLFC")], by=d3[,c("sample","timePoint","crowdset","type")], FUN=\(x) mean(x))
+p2 <- ggplot(ag, aes(crowdset, log2FC, color=timePoint, fill=timePoint)) + geom_boxplot(outliers = FALSE) + theme_bw() + ylab("log2FC") + facet_wrap(~type, nrow=2, scale="free_y")
+p2 + theme_sleek()
+```
+
+
+
+
+
+# DNase
+
+```{r}
+reddy <- readRDS("/mnt/gapp/externData/Reddy_GR_ATAC_K27ac_Dnase/plg/DNaseOnGRpeaks.SE.rds")
+# set.seed(123)
+# nf <- epiwraps::getNormFactors(paste0("/mnt/gapp/externData/Reddy_GR_ATAC_K27ac_Dnase/aligned/",colnames(reddy)), nwind=50000L)
+# reddy$nf <- nf
+# saveRDS(reddy, "/mnt/gapp/externData/Reddy_GR_ATAC_K27ac_Dnase/plg/DNaseOnGRpeaks.SE.rds")
+
+o <- findOverlaps(reddy, rowRanges(experiments(mae)$ATAC))
+o <- splitAsList(to(o), from(o))
+o.n <- max(relist(a549.crowdedness[unlist(o)], o))
+rowData(reddy)$crowdedness <- NA_integer_
+rowData(reddy)$crowdedness[as.integer(names(o.n))] <- o.n
+
+rowData(reddy)$crowdset <- factor((rowData(reddy)$crowdedness>=25) - (rowData(reddy)$crowdedness<15), c(-1,0,1), c("not crowded", "midrange", "crowded"))
+
+row.names(reddy) <- as.character(granges(reddy))
+```
+
+
+```{r}
+doNorm <- function(x, method="TMM"){
+  switch(method,
+         TMM=log1p(edgeR::cpm(DGEList(assay(x)))),
+         bg=log1p(edgeR::cpm(DGEList(assay(x), lib.size = rep(2e7,ncol(x)), norm.factors=x$nf))),
+         depth=log1p(1e7*t(t(assay(x))/x$depth)))
+} 
+seA <- readRDS("/mnt/gapp/externData/Reddy_GR_ATAC_K27ac_Dnase/plg/DNaseOnDnasePeaks.SE.rds") # using time=0 peaks
+row.names(seA) <- as.character(granges(seA))
+assays(seA)$logcpm <- as.matrix(doNorm(seA))
+set.seed(123)
+seA <- SEtools::svacor(seA, ~time, n.sv=1)
+seA <- log2FC(seA, "corrected", seA$time=="0h")
+
+se3 <- reddy[!duplicated(row.names(reddy)),]
+dge <- calcNormFactors(DGEList(assay(seA)))
+dge2 <- DGEList(assay(se3), lib.size = dge$samples$lib.size, norm.factors = dge$samples$norm.factors)
+assays(se3)$logcpm <- log1p(edgeR::cpm(dge2))
+assays(se3)$logcpm <- doNorm(se3)
+metadata(se3)$default_view <- list(top_annotation="time")
+se3 <- SEtools::svacor(se3, ~time, n.sv=1)
+se3 <- log2FC(se3, "corrected", se3$time=="0h")
+#se3 <- log2FC(se3, "logcpm", se3$time=="0h")
+
+#sechm(se3, row.names(se3)[which(seqnames(se3)=="chr1")], gaps_at="signal", gaps_row = "crowdset", breaks=0.9995, row_title_rot=0)
+
+rowData(se3)$baseline <- rowMeans(assay(se3, "logcpm")[,which(se3$time=="0h")])
+
+w <- which(rowData(se3)$crowdset=="not crowded")
+spw <- split(seq_len(nrow(se3)), rowData(se3)$crowdset)
+set.seed(123)
+bgATAC.nC <- getBackgroundSet(rowData(se3)$baseline[spw$`not crowded`], 
+                           rowData(se3)$baseline[spw$crowded], sameSizeBg = FALSE)
+bgATAC.mid <- getBackgroundSet(rowData(se3)$baseline[spw$midrange], 
+                           rowData(se3)$baseline[spw$crowded], sameSizeBg = FALSE)
+
+rowData(seA)$baseline <- rowMeans(assay(seA, "logcpm")[,which(seA$time=="0h")])
+set.seed(123)
+bgATAC.unbound <- getBackgroundSet(rowData(seA)$baseline[!overlapsAny(seA, reddy, maxgap = 5000L)], 
+                           rowData(se3)$baseline[spw$crowded], sameSizeBg = FALSE)
+
+subsets <- c(row.names(se3)[spw$crowded], bgATAC.mid, bgATAC.nC)
+
+d <- meltSE(se3, subsets)
+d2 <- meltSE(seA, bgATAC.unbound)
+d2$crowdset <- "unbound"
+f <- intersect(colnames(d2),colnames(d))
+d <- rbind(d[,f], d2[,f])
+ag <- aggregate(d[,c("logcpm","log2FC","scaledLFC")], by=d[,c("sample","time","crowdset")], FUN=mean)
+
+#saveRDS(ag[which(ag$signal != "H3K27ac" & ag$time!="4h"),], file="crowdedness_GR.rds")
+
+ggplot(ag, aes(crowdset, log2FC, color=time, fill=time)) + geom_boxplot(outliers = FALSE) + theme_bw()
+```
+
+
+## Others
+
+```{r}
+e <- fread("GSE117940_ATAC-seq_peaks.tsv.gz")
+se <- SummarizedExperiment(list(counts=as.matrix(e[,13:18])), rowRanges=makeGRangesFromDataFrame(e[,1:3]))
+```
+

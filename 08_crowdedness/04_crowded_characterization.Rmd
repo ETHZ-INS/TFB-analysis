@@ -1,0 +1,466 @@
+---
+title: "Characterization of crowded regions"
+output: html_document
+date: "2025-11-11"
+---
+
+```{r setup}
+suppressPackageStartupMessages({
+  library(GenomicRanges)
+  library(ggplot2)
+  library(patchwork)
+  library(cowplot)
+  library(EnsDb.Hsapiens.v86)
+  library(MultiAssayExperiment)
+  library(BiocParallel)
+})
+source("../utils/load_all.R", chdir=TRUE)
+```
+
+```{r, eval=FALSE}
+mae <- readRDS("../data/05_maeAll_conFeat_sub.rds")
+
+contextFreq <- sort(table(experiments(mae)$ChIP$context), decreasing=TRUE)
+topContexts <- names(contextFreq)[contextFreq>=100]
+
+atac <- experiments(mae)$ATAC
+atac <- atac[,which(atac$context %in% topContexts)]
+colnames(atac) <- setNames(sapply(strsplit(unlist(atac$origin),"/",fixed=TRUE), \(x) x[2]), atac$context)
+
+assays(atac) <- assays(atac)["total.overlaps"]
+assay(atac) <- as(assay(atac), "sparseMatrix")
+saveRDS(atac, "atac_cellLines.SE.rds")
+
+rm(mae)
+gc(FALSE)
+```
+
+```{r}
+atac <- readRDS("atac_cellLines.SE.rds")
+crwd <- readRDS("crowdedness_per_context.rds")
+crwd.gr <- as(row.names(crwd), "GRanges")
+crwd2 <- 200*t(t(crwd)/attr(crwd, "nTFs"))/pmax(100L,width(crwd.gr))
+```
+
+
+## Repeats / TEs ?
+
+```{r, eval=FALSE}
+repeats <- readRDS("/reference/Homo_sapiens/hg38.repeatMasker.GR.rds")
+o <- findOverlaps(crwd.gr, repeats)
+byClass <- split(from(o), repeats$class[to(o)])
+byFamily <- split(from(o), repeats$family[to(o)])
+byName <- split(from(o), repeats$name[to(o)])
+
+meansPerFamily <- sapply(byFamily, \(x){
+  colMeans(crwd2[x,,drop=FALSE])
+})
+meansPerFamily <- meansPerFamily[,colSums(is.na(meansPerFamily))==0]
+
+Heatmap(meansPerFamily)
+```
+
+They have very low crowdedness
+
+## Super-enhancers
+
+```{r, eval=TRUE}
+se <-
+  lapply(list( K562="http://www.licpathway.net:8081/sedb/download_v3/SE_hg38_bed/SE_01_0039_SE_hg38.bed",
+               GM12878="http://www.licpathway.net:8081/sedb/download_v3/SE_hg38_bed/SE_01_0030_SE_hg38.bed",
+               HepG2="http://www.licpathway.net:8081/sedb/download_v3/SE_hg38_bed/SE_01_0038_SE_hg38.bed",
+               MCF_7="http://www.licpathway.net:8081/sedb/download_v3/SE_hg38_bed/SE_01_0046_SE_hg38.bed",
+               HEK293="http://www.licpathway.net:8081/sedb/download_v3/SE_hg38_bed/SE_02_0434_SE_hg38.bed"),
+       function(x){
+         x <- data.table::fread(x)
+         GRanges(x$se_chr, IRanges(x$se_start, x$se_end), rank=x$se_rank, ntfbs=x$se_tfbs_num)
+       })
+saveRDS(se, file="superEnhancers.rds")
+
+```
+
+```{r}
+se <- readRDS(file="superEnhancers.rds")
+```
+
+
+
+```{r}
+dm <- reshape2::melt(crwd2)
+dm$Var1 <- as.integer(dm$Var1)
+dm$se.rank <- Inf
+colnames(dm)[1:2] <- c("region","celltype")
+
+d <- dplyr::bind_rows(lapply(setNames(names(se),names(se)), \(n){
+  o <- findOverlaps(se[[n]], crwd.gr)
+  dm1 <- dm[which(dm$celltype==n),]
+  dm1 <- dm1[order(dm1$region),]
+  dm1$se.rank[to(o)] <- se[[n]]$rank[from(o)]
+  dm1[which(dm1$value>0),]
+}))
+
+p.se <- ggplot(d, aes(celltype, 100*value, fill=!is.infinite(se.rank))) + 
+    geom_boxplot(outliers=FALSE) + scale_y_sqrt() + theme_bw() +
+  labs(y="Crowdedness (% of TFs)", fill="Super-enhancer", x=NULL)
+```
+
+
+## Promoters?
+
+```{r}
+proms <- promoters(EnsDb.Hsapiens.v86, columns="gene_name")
+seqlevels(proms) <- paste0("chr",seqlevels(proms))
+crwd.gr$isProm <- overlapsAny(crwd.gr, proms)
+o <- findOverlaps(crwd.gr, proms)
+o <- data.frame(region=from(o), g=proms$gene_name[to(o)])
+o <- o[!duplicated(o$region),]
+crwd.gr$gene <- NA
+crwd.gr$gene[o$region] <- o$g
+crwd.gr$isSE <- overlapsAny(crwd.gr, unlist(GRangesList(se)))
+d$isProm <- crwd.gr$isProm[d$region]
+
+p.p <- ggplot(d, aes(celltype, 100*value, fill=isProm)) + 
+    geom_boxplot(outliers=FALSE) + scale_y_sqrt() + theme_bw() +
+  labs(y="Crowdedness (% of TFs)", fill="Promoter", x=NULL)
+```
+
+```{r, fig.width=10, fig.height=4}
+dcrwd <- d[d$value>0.4,]
+getProp <- \(of,by){
+  tt <- table(by, of)
+  tt[,2]/rowSums(tt)
+}
+pboth <- getProp(!is.infinite(dcrwd$se.rank) & dcrwd$isProm, dcrwd$celltype)
+dprop <- data.frame(celltype=levels(dcrwd$celltype),
+                    propProm=getProp(dcrwd$isProm, dcrwd$celltype)-pboth,
+                    propSE=getProp(!is.infinite(dcrwd$se.rank), dcrwd$celltype)-pboth,
+                    propBoth=pboth)
+dp2 <- reshape2:::melt.data.frame(dprop, id.vars = "celltype")
+levels(dp2$variable) <- c("promoters","super-\nenhancers","both")
+
+dpn <- data.frame(celltype=levels(dcrwd$celltype), n=as.integer(table(dcrwd$celltype)))
+attr(dp2, "n") <- dpn
+saveRDS(dp2, "crowded_in_promsSEs.rds")
+
+p.pp <- ggplot(dp2, aes(celltype, 100*value)) + 
+    geom_col(aes(fill=reorder(variable, value))) + theme_bw() +
+    labs(y="% of highly-crowded regions", x=NULL, fill=NULL) +
+    theme(axis.text.x=element_text(angle=90, vjust=0.5, hjust=1), legend.position = "bottom") +
+    guides(fill = guide_legend(nrow = 2)) +
+    geom_text(data=dpn, aes(y=0, label=paste0("n=",n)), hjust=0, nudge_y = 3, angle = 90, size=3.5, color="grey20")
+
+plot_grid(p.se + theme(legend.position = "bottom"), p.p + theme(legend.position = "bottom"), p.pp,
+          nrow=1, rel_widths = c(3,3,2), scale=0.95, labels="AUTO")
+```
+
+
+```{r}
+#' topGO wrapper
+#'
+#' @param genes The vector of genes of interest
+#' @param universe The vector of all genes in the assay
+#' @param collection The GO collection, either "BP", "MF", or "CC"
+#' @param n The number of top terms to report
+#' @param db The organism database
+#' @param algorithm The algorithm to use.
+#'
+#' @return A data.frame of enrichment results
+runTopGO <- function(genes, universe, collection=c("BP","MF","CC"), n=200, maxSize=2000,
+                     db="org.Mm.eg.db", algorithm=c("classic","elim")){
+  library(topGO)
+  library(org.Mm.eg.db)
+  collection <- match.arg(collection)
+  algorithm <- match.arg(algorithm)
+  universe <- unique(c(genes, universe))
+  signature <- setNames(factor(as.integer(universe %in% genes)), universe)
+  o <- new( "topGOdata", ontology=collection, allGenes=signature, nodeSize=5,
+            annot=annFUN.org, mapping=db, ID="symbol" )
+  res <- runTest(o, algorithm=algorithm, statistic = "Fisher" )
+  d <- GenTable( o, Fisher=res, orderBy="Fisher", topNodes=n )
+  d <- d[d$Annotated<maxSize,]
+  d$q <- p.adjust(d$Fisher)
+  d
+}
+
+breakStrings <- function (x, minSizeForBreak = 20, lb = "\n") {
+    sapply(x, minSizeForBreak = minSizeForBreak, lb = lb, FUN = function(x, 
+        minSizeForBreak, lb) {
+        if (nchar(x) <= minSizeForBreak) 
+            return(x)
+        g <- gregexpr(" ", x)[[1]]
+        if (length(g) == 0) 
+            return(x)
+        if (length(g) == 1 & all(g == -1)) 
+            return(x)
+        mid <- nchar(x)/2
+        mid <- g[order(abs(g - mid))[1]]
+        substr(x, mid, mid) <- lb
+        return(x)
+    })
+}
+
+```
+
+
+```{r}
+univ <- unique(crwd.gr$gene[!is.na(crwd.gr$gene)])
+gsets <- lapply(setNames(colnames(crwd2),colnames(crwd2)), \(x){
+  w <- which(crwd2[,x]>=0.4)
+  g <- crwd.gr$gene[w]
+  unique(g[!is.na(g)])
+})
+bgsets <- lapply(setNames(colnames(crwd2),colnames(crwd2)), \(x){
+  w <- which(crwd2[,x]>0 & crwd2[,x]<0.2)
+  g <- crwd.gr$gene[w]
+  unique(g[!is.na(g)])
+})
+saveRDS(gsets, file="crowded_promoters.rds")
+gsets <- readRDS("crowded_promoters.rds")
+```
+
+
+```{r, eval=FALSE}
+res <- bplapply(gsets, BPPARAM=MulticoreParam(length(gsets)), runTopGO, universe=univ, n=3000, db="org.Hs.eg.db")
+saveRDS(res, file="GOenrichments_of_crowdedPromoters.rds")
+```
+
+
+```{r}
+res <- readRDS("GOenrichments_of_crowdedPromoters.rds")
+tt <- table(unlist(lapply(res, \(x) head(x$GO.ID,10))))
+commonTop_gsets <- names(tt)[tt>=3]
+
+unionTop_gsets <- unique(unlist(lapply(res, \(x){
+  head(x$GO.ID[x$q <0.05 & x$Significant>5],5) #[which(x$Fisher<0.01)],3)
+})))
+
+res_top <- dplyr::bind_rows(lapply(res, \(x) x[which(x$GO.ID %in% unionTop_gsets),]), .id="celltype")
+nbSig <- table(res_top$Term[res_top$q<=0.05])
+nbSig <- setNames(as.integer(nbSig), breakStrings(names(nbSig)))
+
+res_top$log2Enrichment <- log2(res_top$Significant/res_top$Expected)
+
+p.enr <- ggplot(res_top, aes(log2(Significant/Expected), breakStrings(Term),
+                    size=-log10(q), color=q<0.05, fill=-log10(q))) + 
+  geom_vline(xintercept = 0, linetype="dashed") + geom_point(pch=21) + 
+  facet_wrap(~celltype, nrow=1, scale="free_x") + theme_bw() + xlim(c(0,NA)) +
+  scale_color_manual(values=c("FALSE"="#FFFFFF00", "TRUE"="red")) +
+  scale_fill_viridis_c() + scale_size_continuous(range=c(4,10)) +
+  labs(x="log2(Enrichment), i.e. log2(crowded/expected)", y="Union of top 5 significant genesets per celltype")
+
+# m <- reshape2::dcast(res_top, Term~celltype, value.var = "log2Enrichment")
+# row.names(m) <- breakStrings(m[,1])
+# m <- as.matrix(m[,-1])
+# m <- m[rowSums(is.na(m))<2,]
+# m[is.na(m)] <- 0
+# Heatmap(m, right_annotation = rowAnnotation("# q<0.05"=anno_barplot(nbSig[row.names(m)], border=FALSE)), col = viridis::viridis(100), name="log2(enrichment)")
+```
+
+
+
+# Do distal peaks explain crowded promoter peaks?
+
+```{r}
+cwd <- readRDS("crowdedness_per_context.rds")
+m <- readRDS("PRE2gene_cellLines.rds")
+chip <- readRDS("chip_cellLines.SE.rds")
+wi <- width(chip)
+gene <- readRDS("promoter_by_PREidx.rds")
+
+res <- dplyr::bind_rows(lapply(setNames(colnames(cwd), colnames(cwd)), \(ct){
+  print(ct)
+  # get the PREs linked to each gene for this celltype
+  links <- m[m$celltype==ct,c(1,3)]
+  # get the TFs IP-ed in each region
+  ch <- assay(chip)[,chip$context2==ct]>0.1
+  # compute nb of TFs per region:
+  nChips <- rowSums(ch)
+  # compute crowdedness per region:
+  cw <- 200*(cwd[,ct]/attr(cwd, "nTFs")[ct])/pmax(100L, wi)
+  # identify crowded promoters
+  cwProms <- gene[which(cw>=0.4 & !is.na(gene) & !duplicated(gene))]
+  # non-crowded ones
+  wBg <- which(cw<0.2 & !is.na(gene) & !duplicated(gene))
+  # all promoters
+  wProms <- which(!is.na(gene) & !duplicated(gene))
+  # non-promoters to use as background enhancers:
+  wNotProms <- which(is.na(gene))
+  enbg <- setNames(nChips[wNotProms], wNotProms)
+  ch2 <- ch[wProms,]
+  row.names(ch2) <- gene[wProms]
+  
+  sp <- split(links$PRE.id, links$gene)
+  names(i) <- i <- intersect(names(sp)[lengths(sp)>2], cwProms)
+  set.seed(123)
+  nSeeds <- 3
+  res <- dplyr::bind_rows(bplapply(i, BPPARAM=MulticoreParam(20, progress=TRUE, RNGseed = 123), 
+                                 \(g){
+    eix <- unique(sp[[g]])
+    pb <- as.integer(ch2[g,])
+    nb <- sum(pb)
+    as.data.frame(c(list(gene.nb=nb, p.true=1-sum(pmax(pb-colSums(ch[eix,]),0L))/nb),
+                    lapply(setNames(seq_len(nSeeds), paste0("p.ctrl",seq_len(nSeeds))), \(j){
+      matched <- getBackgroundSet(nChips, nChips[eix], sameSizeBg=TRUE, right=FALSE, doPlot=FALSE)
+      1-sum(pmax(pb-colSums(ch[matched,]),0L))/nb
+    })))
+  }), .id="gene")
+  res$meanMatched <- rowMeans(res[,grep("ctrl",colnames(res))])
+  res
+}), .id="celltype")
+saveRDS(res, file="TFs_atCrowdedProms_explained_by_contacts.rds")
+
+
+resAll <- dplyr::bind_rows(lapply(setNames(colnames(cwd), colnames(cwd)), \(ct){
+  print(ct)
+  # get the PREs linked to each gene for this celltype
+  links <- m[m$celltype==ct,c(1,3)]
+  # get the TFs IP-ed in each region
+  ch <- assay(chip)[,chip$context2==ct]>0.1
+  # compute nb of TFs per region:
+  nChips <- rowSums(ch)
+  # compute crowdedness per region:
+  cw <- 200*(cwd[,ct]/attr(cwd, "nTFs")[ct])/pmax(100L, wi)
+  # identify crowded promoters
+  cwProms <- gene[which(cw>=0.1 & !is.na(gene) & !duplicated(gene))]
+  # all promoters
+  wProms <- which(!is.na(gene) & !duplicated(gene))
+  # non-promoters to use as background enhancers:
+  wNotProms <- which(is.na(gene))
+  enbg <- setNames(nChips[wNotProms], wNotProms)
+  ch2 <- ch[wProms,]
+  row.names(ch2) <- gene[wProms]
+  
+  sp <- split(links$PRE.id, links$gene)
+  names(i) <- i <- intersect(names(sp)[lengths(sp)>2], cwProms)
+  set.seed(123)
+  nSeeds <- 3
+  res <- dplyr::bind_rows(bplapply(i, BPPARAM=MulticoreParam(20, progress=TRUE, RNGseed = 123), 
+                                 \(g){
+    eix <- unique(sp[[g]])
+    pb <- as.integer(ch2[g,])
+    nb <- sum(pb)
+    as.data.frame(c(list(gene.nb=nb, p.true=1-sum(pmax(pb-colSums(ch[eix,]),0L))/nb),
+                    lapply(setNames(seq_len(nSeeds), paste0("p.ctrl",seq_len(nSeeds))), \(j){
+      matched <- getBackgroundSet(nChips, nChips[eix], sameSizeBg=TRUE, right=FALSE, doPlot=FALSE)
+      1-sum(pmax(pb-colSums(ch[matched,]),0L))/nb
+    })))
+  }), .id="gene")
+  res$meanMatched <- rowMeans(res[,grep("ctrl",colnames(res))])
+  res
+}), .id="celltype")
+
+cwd <- readRDS("crowdedness_per_context.rds")
+crwd2 <- 200*t(t(cwd)/attr(cwd, "nTFs"))/pmax(100L,wi)
+genes <- readRDS("promoter_by_PREidx.rds")
+gene.crwd <- dplyr::bind_rows(lapply(setNames(colnames(crwd2), colnames(crwd2)), \(ct){
+  x <- sapply(split(seq_along(genes),genes), \(i) max(crwd2[i,ct]))
+  data.frame(gene=names(x), crwd=x)
+}), .id="celltype")
+res <- merge(gene.crwd, resAll, by=c("celltype", "gene"))
+saveRDS(res, file="TFs_atCrowdedProms_explained_by_contacts_all.rds")
+```
+
+
+
+
+# Are crowded peaks dependent on cross-linking?
+
+
+
+```{r}
+lf <- list.files("/mnt/germain/datasets/cutnrun/", pattern="narrowPeak$", full=TRUE)
+names(lf) <- gsub("_peaks.narrowPeak","",basename(lf))
+peaks <- lapply(lf, rtracklayer::import)
+peaks2 <- list(MAX=reduce(unlist(GRangesList(peaks[1:2]))), MYC=reduce(unlist(GRangesList(peaks[3:4]))))
+
+# download.file("https://hgdownload.soe.ucsc.edu/goldenPath/hg19/liftOver/hg19ToHg38.over.chain.gz", "/reference/Homo_sapiens/hg19ToHg38.over.chain.gz")
+
+chain <- rtracklayer::import.chain("/reference/Homo_sapiens/hg19ToHg38.over.chain")
+lo <- lapply(peaks2, chain=chain, rtracklayer::liftOver)
+lo <- lapply(lo, \(x){
+  x <- reduce(x, min.gap=5L)
+  unlist(x[lengths(x)==1])
+})
+peaks <- lo
+
+# lf <- list.files("/mnt/germain/datasets/cutnrun/", pattern="narrowPeak\\.gz$", full=TRUE)
+# names(lf) <- gsub(".narrowPeak\\.gz|GSE308248_macs3_","",basename(lf))
+# peaks <- lapply(lf, rtracklayer::import)
+# seqlevelsStyle(peaks[[1]]) <- "UCSC"
+# seqlevelsStyle(peaks[[2]]) <- "UCSC"
+# peaks <- c(lo, peaks)
+
+chip <- readRDS("chip_cellLines.SE.rds")
+gr <- rowRanges(chip)
+cnr <- sapply(setNames(names(peaks),names(peaks)), \(x){
+  overlapsAny(gr, peaks[[x]])
+})
+chip2 <- sapply(setNames(names(peaks),names(peaks)), \(x){
+  assay(chip)[,which(chip$context2=="K562" & chip$tfName==x)]>0.1
+})
+
+atac <- experiments(readRDS("../data/05_maeAll_conFeat_sub.rds"))$ATAC
+atac <- atac[,which(colnames(atac)==chip$context[which(chip$context2=="K562")[1]])]
+atac <- 200*as.integer(assay(atac)[,1])/pmax(200, width(atac))
+
+gr$crwd <- crwd2[,"K562"]
+gr$crwd.bin <- cut(gr$crwd, breaks = c(-Inf,0,0.05,0.2,0.4,Inf))
+gr$ATAC <- atac
+levels(gr$crwd.bin) <- c("0", "(0,5%]", "(5%,20%]", "(20%,40%]", ">40%")
+
+set.seed(123)
+w <- which(gr$crwd<=0.2)
+ctrl.bins <- lapply(split(seq_along(gr), gr$crwd.bin)[4:5], \(x){
+  w[getBackgroundSet(gr$ATAC[w], gr$ATAC[x], sameSizeBg=length(x)<500, nQ=200)]
+})
+
+d2 <- dplyr::bind_rows(lapply(split(seq_along(gr), gr$crwd.bin), \(w){
+  as.data.frame(t(sapply(setNames(names(peaks),names(peaks)), \(x){
+    sum(chip2[w,x] & cnr[w,x])/sum(chip2[w,x])
+  })))
+}), .id="crwd.bin")
+d2b <- dplyr::bind_rows(lapply(ctrl.bins, \(w){
+  as.data.frame(t(sapply(setNames(names(peaks),names(peaks)), \(x){
+    sum(chip2[w,x] & cnr[w,x])/sum(chip2[w,x])
+  })))
+}), .id="crwd.bin")
+
+d2b$crwd.bin <- c("ctrl 20-50%", "ctrl >40%")
+
+d2c <- reshape2:::melt.data.frame(rbind(d2,d2b), id.vars = "crwd.bin")
+d2c$crwd.bin <- factor(d2c$crwd.bin, c(levels(gr$crwd.bin), d2b$crwd.bin))
+saveRDS(d2c, file="reproducibility_by_cutnrun.rds")
+ggplot(d2c, aes(crwd.bin, value, colour=variable, group=variable)) + geom_line(linewidth=1.5) +
+  labs(y="Proportion of ChIP peaks reproduced by Cut&Run",
+       x="Crowdedness (% of assayed TFs)") + theme_bw() + ylim(c(0,NA))
+```
+
+
+# Are the reproducibility scores in crowded regions different?
+
+```{r}
+atac <- assay(readRDS("atac_cellLines.SE.rds"))
+res <- dplyr::bind_rows(bplapply(setNames(colnames(crwd2),colnames(crwd2)), 
+                                 BPPARAM=MulticoreParam(5), \(ct){
+  crwd.bin <- cut(crwd2[,ct], breaks = c(-Inf,0,0.05,0.2,0.4,Inf))
+  idx_per_bin <- split(seq_along(gr), crwd.bin)[-1]
+  ctrl <- lapply(idx_per_bin, \(i){
+    w <- which(!(seq_along(gr) %in% i))
+    w[getBackgroundSet(atac[w,ct], atac[i,ct], sameSizeBg=length(i)<500, nQ=200)]
+  })
+  names(ctrl) <- paste0("ctrl ", names(ctrl))
+  chip2 <- assay(chip)[,which(chip$context2==ct)]
+  chip2 <- as(chip2, "TsparseMatrix")
+  dplyr::bind_rows(lapply(c(idx_per_bin, ctrl), \(i){
+    w <- which((chip2@i+1L) %in% i)
+    dplyr::bind_rows(lapply(split(chip2@x[w], factor(colnames(chip2))[chip2@j[w]+1]), \(x){
+           x <- x[which(x>0)]
+           data.frame(mean=mean(x), median=median(x))
+    }), .id="TF")
+  }), .id="bin")
+}), .id="celltype")
+res$TF <- as.factor(gsub(".+_","",res$TF))
+for(f in c("celltype","bin")) res[[f]] <- factor(res[[f]], unique(res[[f]]))
+saveRDS(res, file="reprodScores_by_crwdBin.rds")
+```
+

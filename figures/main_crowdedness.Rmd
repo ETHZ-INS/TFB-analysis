@@ -25,7 +25,7 @@ source("../utils/load_all.R", chdir=TRUE)
 # Crowdedness
 
 ```{r, fig.width=10, fig.height=2}
-context.crwd <- readRDS("../09_crowdedness/crowdedness_per_context.rds")
+context.crwd <- readRDS("../08_crowdedness/crowdedness_per_context.rds")
 med <- floor(attr(context.crwd, "nTFs")/2)
 med <- data.frame(Var2=names(med), value=med)
 nTfs <- reshape2:::melt(context.crwd)
@@ -78,7 +78,7 @@ upset <- ComplexHeatmap::UpSet(cm2, pt_size=unit(2, "mm"), lwd=1.5, row_names_gp
 # Relationship between crowdedness and accessibility
 
 ```{r}
-dat1 <- readRDS("../09_crowdedness/crowdedness_vs_ATAC.rds")
+dat1 <- readRDS("../08_crowdedness/crowdedness_vs_ATAC.rds")
 dat1$context <- factor(dat1$context, names(colnames(context.crwd)), colnames(context.crwd))
 dat1$crwd2 <- 200*100*(dat1$crwd/attr(context.crwd, "nTFs")[as.integer(dat1$context)])/pmax(100, dat1$width)
 dat1$ATAC2 <- 200*dat1$ATAC/pmax(200,dat1$width)
@@ -92,7 +92,7 @@ p_cwd_atac
 # Promoters/SEs
 
 ```{r}
-dp2 <- readRDS("../09_crowdedness/crowded_in_promsSEs.rds")
+dp2 <- readRDS("../08_crowdedness/crowded_in_promsSEs.rds")
 dpn <- attr(dp2, "n")
 dp2$variable[which(dp2$variable=="both")] <- "promoters"
 p.pp <- ggplot(dp2, aes(celltype, 100*value)) + 
@@ -111,7 +111,7 @@ p.pp <- ggplot(dp2, aes(celltype, 100*value)) +
 Mean motif matching score (as a proportion of the TF's maximum matching score) in crowded vs non-crowded peaks:
 
 ```{r}
-m <- readRDS("../09_crowdedness/motifScores_in_crowded_vs_bound_V3.rds")
+m <- readRDS("../08_crowdedness/motifScores_in_crowded_vs_bound_V3.rds")
 m$set <- factor(m$set, levels(m$set)[c(2,3,1,5,4)], c("non-crowded\nbound sites", "all bound\nsites", "crowded\nbound sites", "matched\nnon-bound", "all non-bound"))
 p1 <- ggplot(m, aes(set, pmax(-1,mean/TF.maxMotifScore))) + stat_summary() +
   theme_sleek() + labs(x=NULL, y="Mean motif matching\n(proportion of max\nmotif matching score)")
@@ -192,7 +192,7 @@ p4 <- ggplot(m3, aes(value, reorder(customClass, crowdedness))) + stat_summary()
 # GR example - crowded peaks are no less causally relevant
 
 ```{r}
-d3 <- readRDS("../09_crowdedness/crowdedness_GR_rna.rds")
+d3 <- readRDS("../08_crowdedness/crowdedness_GR_rna.rds")
 ag <- aggregate(d3[,c("log2FC","scaledLFC")], by=d3[,c("sample","timePoint","crowdset","type")], FUN=\(x) mean(x))
 levels(ag$crowdset) <- c(paste0("GR peak\n", levels(ag$crowdset)[1:3]), "matched\nno GR")
 
@@ -210,7 +210,7 @@ p2 <- ggplot(ag, aes(crowdset, log2FC, fill=timePoint)) + geom_boxplot(outliers 
 ```
 
 ```{r}
-d <- readRDS("../09_crowdedness/crowdedness_GR.rds")
+d <- readRDS("../08_crowdedness/crowdedness_GR.rds")
 d$signal <- factor(d$signal, c("NR3C1", "ATACseq", "DNaseseq"), c("NR3C1\nChIP-seq", "ATAC-seq", "DNase-seq"))
 d <- d[grep("NR3C1",d$signal),]
 levels(d$crowdset)[1] <- "not\ncrowded"

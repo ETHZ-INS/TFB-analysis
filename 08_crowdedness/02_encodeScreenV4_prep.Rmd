@@ -1,0 +1,73 @@
+---
+title: "Preparation of the ENCODE screen data"
+output: html_document
+date: "2025-11-21"
+---
+
+```{r setup}
+suppressPackageStartupMessages({
+  library(data.table)
+  library(GenomicRanges)
+  library(EnsDb.Hsapiens.v86)
+  library(SummarizedExperiment)
+  library(BiocParallel)
+})
+source("../utils/load_all.R", chdir=TRUE)
+setDTthreads(4)
+```
+
+Data downloaded from https://downloads.wenglab.org/Human-Gene-Links.zip on Nov 13, 2025
+
+
+Map ENCODE Screen CRE IDs to our putative regulatory elements (PREs):
+
+```{r}
+r <- fread("GRCh38-cCREs.ELS.bed")
+r <- GRanges(r$V1, IRanges(r$V2, r$V3), name=r$V5, type=factor(r$V6))
+pres <- readRDS("../encode_consensus_sets/hybrid.custom.hg38.resized.resplit.rds")
+o <- findOverlaps(pres, r)
+o <- o[!duplicated(from(o))]
+pres$EH.id <- NA_character_
+pres$EH.id[from(o)] <- r$name[to(o)]
+saveRDS(pres, "PREs_to_ScreenEHid.rds")
+r$PRE <- NA_integer_
+r$PRE[to(o)] <- from(o)
+```
+
+Count number of contacts
+
+```{r}
+a <- fread("V4-hg38.Gene-Links.3D-Chromatin.txt")
+pres <- readRDS("PREs_to_ScreenEHid.rds")
+b <- a[which(a$V1 %in% unique(pres$EH.id)),c("V1","V3","V7")]
+tt <- as.matrix(table(b$V3, b$V7))
+saveRDS(tt, file="Nb_3D_links_per_Gene.rds")
+```
+
+extract contacting PREs per gene for the 5 cell lines:
+
+```{r}
+cwd <- readRDS("crowdedness_per_context.rds")
+b <- as.data.frame(b[which(b$V7 %in% gsub("_","-",colnames(cwd))),])
+w <- which(!is.na(pres$EH.id))
+m <- merge(b, data.frame(idx=w,EH.id=pres$EH.id[w]), by.x="V1", by.y="EH.id")
+m$V7 <- factor(m$V7, gsub("_","-",colnames(cwd)), colnames(cwd))
+colnames(m) <- c("EHid", "gene", "celltype", "PRE.id")
+m <- m[,-1]
+saveRDS(m, file="PRE2gene_cellLines.rds")
+```
+
+Adding promoter anotation:
+
+```{r}
+crwd.gr <- as(row.names(cwd), "GRanges")
+proms <- promoters(EnsDb.Hsapiens.v86, columns="gene_name")
+seqlevels(proms) <- paste0("chr",seqlevels(proms))
+crwd.gr$isProm <- overlapsAny(crwd.gr, proms)
+o <- findOverlaps(crwd.gr, proms)
+o <- data.frame(region=from(o), g=proms$gene_name[to(o)])
+o <- o[!duplicated(o$region),]
+crwd.gr$gene <- NA
+crwd.gr$gene[o$region] <- o$g
+saveRDS(crwd.gr$gene, "promoter_by_PREidx.rds")
+```

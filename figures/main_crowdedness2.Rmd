@@ -32,7 +32,7 @@ schemes <- lapply(names(schemes), \(n){
 # Nb 3D links in crowded vs non-crowded promoters
 
 ```{r}
-d <- readRDS("../09_crowdedness/Nb_3D_links_crowded_vs_non.rds")
+d <- readRDS("../08_crowdedness/Nb_3D_links_crowded_vs_non.rds")
 p1 <- ggplot(d, aes(set, 1L+nL)) + facet_wrap(~celltype, nrow=1) + geom_violin(fill="lightblue") + 
   stat_summary(fun.data=mean_se) + theme_sleek() + theme(axis.text.x=element_text(angle=90, vjust=0.5, hjust=1)) +
   scale_y_log10(breaks=c(1,10^(1:3)-1), label=c(0,10^(1:3))) + #, limits=c(NA,2500)) + 
@@ -43,7 +43,7 @@ p1 <- ggplot(d, aes(set, 1L+nL)) + facet_wrap(~celltype, nrow=1) + geom_violin(f
 # do distal peaks explain promoter peaks?
 
 ```{r}
-res <- readRDS("../09_crowdedness/TFs_atCrowdedProms_explained_by_contacts_all.rds")
+res <- readRDS("../08_crowdedness/TFs_atCrowdedProms_explained_by_contacts_all.rds")
 res1 <- res[which(res$crwd>=0.4),]
 
 res2 <- reshape2:::melt.data.frame(res, id.vars=c("gene","celltype", "crwd"), measure.vars=c("p.true", "meanMatched"))

@@ -1,0 +1,209 @@
+---
+title: "04.2 Feature additions"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r, setup}
+suppressPackageStartupMessages({
+library(ggplot2)
+library(cowplot)
+library(patchwork)
+library(TFBlearner)
+source("../utils/plot_theme.R")  
+})
+
+seed <- 42 # params$seed
+set.seed(seed)
+setDTthreads(8)
+ls <- 12
+```
+
+```{r, setup data}
+selectedTfs <- c("ELF1", "SMAD1", # pioneers
+                 "USF2", "ZNF292", # settlers
+                 "FOS", "MEF2D") # migrants
+
+mae <- readRDS("../data/05_maeAll_conFeat_sub.rds") 
+cols <- lapply(experiments(mae), function(n) {
+        colnames(n)[colnames(n) %in% unique(subset(sampleMap(mae), 
+             !isTesting)$colname)]})
+mae <- subsetByColumn(mae, cols)
+nTrain <- lapply(selectedTfs, function(tf){
+                 length(getContexts(mae, tfName=tf, which="Both"))})
+metaTf <- data.table(n_train_context=unlist(nTrain)-1,
+                     tf=selectedTfs)
+
+tfAnnot <- readRDS("../08_meta/TF_annotation.rds")
+tfAnnot <- as.data.table(tfAnnot, keep.rownames=TRUE)
+metaTf <- merge(metaTf, 
+                tfAnnot[,c("TF", "ChromatinOpeningType")], 
+                by.x=c("tf"), by.y=c("TF"))
+metaTf[,ChromatinOpeningType:=fifelse(grepl("migrant", ChromatinOpeningType), 
+                                      "migrant", ChromatinOpeningType)]
+```
+
+
+
+```{r, load results}
+perfFiles <- list.files("feature_additions", full.names=TRUE, 
+                        pattern="performance_*")
+perfDt <- lapply(perfFiles, fread)
+names(perfDt) <- basename(perfFiles)
+perfDt <- rbindlist(perfDt, idcol="setting")
+perfDt[, val_round:=tstrsplit(setting, split="_", keep=4)]
+perfDt <- subset(perfDt, tfName %in% selectedTfs)
+```
+
+```{r, overall performance}
+perfConDt <- subset(perfDt, computed=="val_context" & submodel=="pred_stacked")
+perfConAgDt <- perfConDt[,.(median_aupr=median(auc_pr_mod),
+                            mean_aupr=mean(auc_pr_mod), 
+                            n_p=.N), by=.(added_feature_group)]
+perfConAgDt[,mean_rank:=frank(mean_aupr)]
+perfConAgDt[,median_rank:=frank(median_aupr)]
+perfConAgDt[,comb_rank:=(mean_rank+median_rank)]
+setorder(perfConAgDt, comb_rank)
+perfConAgDt[,added_feature_group:=factor(added_feature_group,
+                                        levels=unique(perfConAgDt$added_feature_group), 
+                                        ordered=TRUE)]
+
+setnames(perfConAgDt, c("median_aupr", "mean_aupr"), 
+                      c("Median", "Mean"))
+perfConAg2Dt <- melt(perfConAgDt[,c("Median", "Mean", "added_feature_group")],
+                    id.vars=c("added_feature_group"))
+perfConAg2Dt[,variable:=factor(variable, levels=c("Median", "Mean"), 
+                               ordered=TRUE)]
+perfConAg2Dt[,variable:=factor(variable, levels=c("Median", "Mean"), 
+                               ordered=TRUE)]
+
+perfConAg2Dt[,color_flag:=fifelse(value>quantile(value,0.5), 
+                                  "isHigh", "isLow")]
+perfConAg2Dt[,variable:=factor(variable, levels=c("Median", "Mean"), 
+                               ordered=TRUE)]
+p.full <- ggplot(perfConAg2Dt, aes(y=added_feature_group, x=variable, fill=value))+
+          geom_tile()+
+          scale_fill_viridis_c(option="B")+
+          labs(y="Added Feature Group", fill="AUPRC", 
+               tag="A", x="")+
+          scale_colour_manual(values=c("isHigh"="black", "isLow"="white"), 
+                              guide = "none") +
+          geom_text(aes(label=round(value, 2), color=color_flag), 
+                    size=6)+
+          theme_sleek()+
+          theme(legend.text=element_text(size=ls),
+                legend.title=element_text(size=ls),
+                strip.text=element_text(size=ls),
+                axis.title.x=element_text(size=ls),
+                axis.text.x=element_text(size=ls),
+                axis.text.y=element_text(size=ls),
+                axis.title.y=element_text(size=ls),
+                plot.tag=element_text(size=20))
+          #theme(legend.position="bottom")
+p.full
+```
+
+
+```{r, plot feature addition by tf}
+perfAddConDt <- subset(perfConDt, added_feature_group!="base")[, c("auc_pr_mod", "tfName",
+                                                                   "context", "added_feature_group"), with=FALSE]
+perfBaseConDt <- subset(perfConDt, added_feature_group=="base")[, c("auc_pr_mod", "tfName",
+                                                                    "context", "added_feature_group"), with=FALSE]
+
+perfDiffDt <- merge(perfAddConDt, perfBaseConDt, by=c("tfName", "context"))
+perfDiffDt[,diff_aucpr:=auc_pr_mod.x-auc_pr_mod.y]
+perfDiffAgDt <- perfDiffDt[,.(mean_diff_aucpr=mean(diff_aucpr), 
+                              sd_diff_aucpr=sd(diff_aucpr)),
+                           by=.(tfName, added_feature_group.x)]
+setnames(perfDiffAgDt, "added_feature_group.x", "added_feature_group")
+setnames(perfDiffDt, "added_feature_group.x", "added_feature_group")
+perfDiffDt <- merge(perfDiffDt, metaTf, by.x=c("tfName"), by.y=c("tf"))
+perfDiffDt[,n_train_context:=factor(n_train_context, 
+                                    levels=unique(n_train_context), 
+                                    ordered=TRUE)]
+setorder(perfDiffDt, n_train_context, ChromatinOpeningType)
+perfDiffDt[,tfName:=factor(perfDiffDt$tfName, 
+                           levels=unique(perfDiffDt$tfName), 
+                           ordered=TRUE)]
+p.diff.plot <- ggplot(perfDiffDt, aes(y=added_feature_group, 
+                       x=diff_aucpr, 
+                       color=n_train_context, 
+                       shape=ChromatinOpeningType))+
+  stat_summary(size=0.75)+
+  scale_color_manual(values=cbbPalette)+
+  facet_wrap(~tfName, ncol=3, nrow=3)+
+  labs(tags="B", x=expression(Delta*" AUPRC"), 
+       y="Added Feature Group",
+       color="Number of \ntraining contexts", 
+       shape="Chromatin \nopening type")+
+  #scale_x_discrete(guide = guide_axis(n.dodge=3))+
+  geom_vline(xintercept=0, linetype="dashed")+
+  theme_sleek()+
+  theme(legend.text=element_text(size=ls),
+        legend.title=element_text(size=ls),
+        strip.text=element_text(size=ls),
+        axis.title.x=element_text(size=ls),
+        axis.text.x=element_text(size=ls),
+        axis.text.y=element_text(size=ls),
+        axis.title.y=element_text(size=ls),
+        plot.tag=element_text(size=20))
+
+# p.diff.plot <- ggplot(perfDiffDt, aes(x=added_feature_group, 
+#                        y=diff_aucpr, 
+#                        color=n_train_context, 
+#                        shape=ChromatinOpeningType))+
+#   stat_summary(size=0.75)+
+#   scale_color_manual(values=cbbPalette)+
+#   facet_wrap(~tfName, ncol=3, nrow=2)+
+#   labs(tags="B", y=expression(Delta*" AUPRC"), 
+#        x="Added Feature Group",
+#        color="Number of \ntraining contexts", 
+#        shape="Chromatin \nopening type")+
+#   #scale_x_discrete(guide = guide_axis(n.dodge=3))+
+#   geom_hline(yintercept=0, linetype="dashed")+
+#   theme_sleek()+
+#   theme(axis.text.x=element_text(angle=60, hjust=1))
+```
+
+```{r, full heatmap}
+perfConDt <- subset(perfConDt, submodel=="pred_stacked")
+perfConDt[,tf_val_round:=paste(tfName, val_round,sep=".")]
+perfCon2Dt <- perfConDt[,.(mean_auc_pr_mod=mean(auc_pr_mod)), 
+                         by=.(tf_val_round, added_feature_group)]
+perfCon2Dt[,added_feature_group:=factor(added_feature_group, 
+                                        levels=levels(perfConAg2Dt$added_feature_group), 
+                                        ordered=TRUE)]
+perfCon2Dt[,color_flag:=fifelse(mean_auc_pr_mod>quantile(mean_auc_pr_mod,0.5), 
+                                "isHigh", "isLow")]
+p.hmp.full <- ggplot(perfCon2Dt, aes(y=tf_val_round, x=added_feature_group, 
+                      fill=mean_auc_pr_mod))+
+scale_fill_viridis_c(option="B")+
+labs(tags="C", x="Added Feature Group", fill="Mean AUPRC")+
+geom_tile()+
+geom_text(aes(label=round(mean_auc_pr_mod, 2), color=color_flag),
+          size=6)+
+scale_x_discrete(guide = guide_axis(n.dodge=2))+
+scale_colour_manual(values=c("isHigh"="black", "isLow"="white"), 
+                              guide = "none")+
+theme_sleek()+
+theme(axis.title.y=element_blank(),
+      legend.text=element_text(size=ls),
+      legend.title=element_text(size=ls),
+      strip.text=element_text(size=ls),
+      axis.title.x=element_text(size=ls),
+      axis.text.x=element_text(size=ls),
+      axis.text.y=element_text(size=ls),
+      plot.tag=element_text(size=20))
+```
+
+```{r, full plot}
+(p.full+p.diff.plot+plot_layout(widths=c(1,2))) / p.hmp.full
+ggsave("supplementary_feature_additions.pdf", 
+       width=40, height=30, units="cm", dpi=150)
+```
+
+
+```{r, sessionInfo}
+library(sessioninfo)
+```

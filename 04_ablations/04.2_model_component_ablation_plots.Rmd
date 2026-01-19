@@ -1,0 +1,636 @@
+---
+title: "04.1 Model component ablations Plots"
+output: html_document
+---
+
+```{r, setup}
+suppressPackageStartupMessages({
+library(ggplot2)
+library(cowplot)
+library(patchwork)
+library(TFBlearner)
+source("../utils/plot_theme.R")  
+source("../utils/get_pr_stats.R") 
+})
+
+seed <- 42
+set.seed(seed)
+setDTthreads(8)
+ls <- 14
+```
+
+```{r, setup data}
+selectedTfs <- c("ELF1", "SMAD1",  # pioneers
+                 "USF2", "ZNF292", # settlers
+                 "FOS", "MEF2D")   # migrants
+
+mae <- readRDS("../data/05_maeAll_conFeat_sub.rds") 
+cols <- lapply(experiments(mae), function(n) {
+        colnames(n)[colnames(n) %in% unique(subset(sampleMap(mae), 
+             !isTesting)$colname)]})
+mae <- subsetByColumn(mae, cols)
+nTrain <- lapply(selectedTfs, function(tf){
+                 length(getContexts(mae, tfName=tf, which="Both"))})
+metaTf <- data.table(n_train_context=unlist(nTrain)-1,
+                     tf=selectedTfs)
+
+tfAnnot <- readRDS("../08_meta/TF_annotation.rds")
+tfAnnot <- as.data.table(tfAnnot, keep.rownames=TRUE)
+metaTf <- merge(metaTf, 
+                tfAnnot[,c("TF", "ChromatinOpeningType")], 
+                by.x=c("tf"), by.y=c("TF"))
+metaTf[,ChromatinOpeningType:=fifelse(grepl("migrant", ChromatinOpeningType), 
+                                            "migrant", ChromatinOpeningType)]
+```
+
+```{r, load results}
+perfFiles <- list.files("component_ablations", full.names=TRUE, 
+                        pattern="performance_*")
+perfDt <- lapply(perfFiles, fread)
+names(perfDt) <- basename(perfFiles)
+perfDt <- rbindlist(perfDt, idcol="setting")
+perfDt[,c("val_round", "tf", "tune_hyperparams", 
+          "lo_context", "measure"):=tstrsplit(setting, split="_", keep=4:8, 
+                                              type.convert=TRUE)]
+perfDt[,measure:=gsub(".tsv", "", measure)]
+perfDt[,c("param_setting"):=paste(tune_hyperparams, 
+                                  lo_context, measure, sep="_")]
+perfDt <- subset(perfDt, tf %in% selectedTfs)
+```
+
+```{r, overall performance}
+perfConDt <- subset(perfDt, computed=="val_context")
+perfConAgDt <- perfConDt[,.(median_aupr=median(auc_pr_mod),
+                            mean_aupr=mean(auc_pr_mod), 
+                            n_p=.N), by=.(param_setting, 
+                                            submodel)]
+perfConAgDt[,mean_rank:=frank(mean_aupr)]
+perfConAgDt[,median_rank:=frank(median_aupr)]
+perfConAgDt[,comb_rank:=(mean_rank+median_rank)]
+
+setorder(perfConAgDt, comb_rank)
+perfConAgDt[,submodel_text:=fifelse(submodel=="pred_stacked",
+                                    "stacked", submodel)]
+perfConAgDt[,submodel_text:=fifelse(submodel=="pred_top_weighted_pos",
+                                    "single: top weight peaks", submodel_text)]
+perfConAgDt[,submodel_text:=fifelse(submodel=="pred_med_weighted_pos",
+                                    "single: top&med weight peaks", submodel_text)]
+perfConAgDt[,submodel_text:=fifelse(submodel=="pred_all_weighted_pos",
+                                    "single: all weighted peaks", submodel_text)]
+perfConAgDt[,submodel_text:=fifelse(submodel=="pred_all_pos",
+                                    "single: all peaks", submodel_text)]
+perfConAgDt[,c("tune_hyperparams", "lo_context", "measure"):=tstrsplit(param_setting, split="_", 
+                                                                       type.convert=TRUE)]
+
+perfConAgDt[,tune_hyperparams:=fifelse(tune_hyperparams, "tuned", "nonTuned")]
+perfConAgDt[,lo_context:=fifelse(lo_context, "loco", "5-fold")]
+perfConAgDt[,measure:=fifelse(measure=="classif.logloss", "logloss", "aucpr")]
+perfConAgDt[,full_param_setting:=paste(submodel_text, tune_hyperparams, 
+                                       lo_context, measure, sep=">")]
+perfConAgDt[,full_param_setting:=factor(full_param_setting,
+                                        levels=unique(perfConAgDt$full_param_setting), 
+                                        ordered=TRUE)]
+setnames(perfConAgDt, c("median_aupr", "mean_aupr"), 
+                      c("Median", "Mean"))
+perfConAg2Dt <- melt(perfConAgDt[,c("Median", "Mean", "full_param_setting")],
+                    id.vars=c("full_param_setting"))
+
+perfConAg2Dt[,color_flag:=fifelse(value>quantile(value,0.25), 
+                                  "isHigh", "isLow")]
+perfConAg2Dt[,variable:=factor(variable, levels=c("Median", "Mean"), 
+                               ordered=TRUE)]
+p.full <- ggplot(perfConAg2Dt, aes(y=full_param_setting, x=variable, fill=value))+
+          geom_tile()+
+          scale_fill_viridis_c(option="B")+
+          geom_text(aes(label=round(value, 2), colour=color_flag), size=6)+
+          scale_colour_manual(values=c("isHigh"="black", "isLow"="white"), 
+                              guide = "none") +
+          labs(y="Parameter setting", fill="AUPRC", 
+               tag="A", x="")+
+          theme_sleek()+
+          theme(legend.title=element_text(size=ls),
+                legend.text=element_text(size=12),
+                strip.text=element_text(size=ls),
+                axis.title.x=element_text(size=ls),
+                axis.text.x=element_text(size=ls),
+                axis.text.y=element_text(size=16),
+                axis.title.y=element_text(size=16),
+                plot.tag=element_text(size=24))
+p.full
+```
+
+```{r, logloss vs aucpr}
+# common x-axis
+perfConMeasureDt <- subset(perfConDt, submodel=="pred_stacked" &
+                                      tune_hyperparams==TRUE & lo_context==TRUE)
+perfConMeasureDt <- merge(subset(perfConMeasureDt, measure=="classif.aucpr"),
+                          subset(perfConMeasureDt, measure=="classif.logloss"), 
+                          by=c("tf", "val_round", "context"))
+perfConMeasureDt[,diff_aucpr:=auc_pr_mod.y-auc_pr_mod.x]
+perfConMeasureDt <- perfConMeasureDt[,c("diff_aucpr", "tf"), with=FALSE]
+perfConMeasureDt$ablation <- "Comparison: logloss vs aucpr"
+```
+
+```{r, ablate leave-out-context}
+# common x-axis
+perfConLeaveOutDt <- subset(perfConDt, submodel=="pred_stacked" &
+                                       measure=="classif.aucpr" & 
+                                       tune_hyperparams==TRUE)
+perfConLeaveOutDt <- merge(subset(perfConLeaveOutDt, lo_context==TRUE),
+                           subset(perfConLeaveOutDt, lo_context==FALSE), 
+                          by=c("tf", "val_round", "context"))
+perfConLeaveOutDt[,diff_aucpr:=auc_pr_mod.y-auc_pr_mod.x]
+perfConLeaveOutDt <- perfConLeaveOutDt[,c("diff_aucpr", "tf"), with=FALSE]
+perfConLeaveOutDt$ablation <- "Ablated: loco"
+```
+
+```{r, ablation weights}
+perfConWeightsDt <- subset(perfConDt, measure=="classif.aucpr" & 
+                                       tune_hyperparams==TRUE & 
+                                       lo_context==TRUE)
+perfConWeightsDt <- merge(subset(perfConWeightsDt, submodel=="pred_all_weighted_pos"),
+                          subset(perfConWeightsDt, submodel=="pred_all_pos"), 
+                          by=c("tf", "val_round", "context"))
+perfConWeightsDt[,diff_aucpr:=auc_pr_mod.y-auc_pr_mod.x]
+perfConWeightsDt <- perfConWeightsDt[,c("diff_aucpr", "tf"), with=FALSE]
+perfConWeightsDt$ablation <- "Ablated: instance weights"
+```
+
+```{r, comparison stacked vs non stacked}
+perfConStackedDt <- subset(perfConDt, measure=="classif.aucpr" & 
+                                      tune_hyperparams==TRUE & 
+                                      lo_context==TRUE)
+perfConStackedDt <- merge(subset(perfConStackedDt, submodel=="pred_stacked"),
+                          subset(perfConStackedDt, submodel=="pred_all_weighted_pos"), 
+                          by=c("tf", "val_round", "context"))
+perfConStackedDt[,diff_aucpr:=auc_pr_mod.y-auc_pr_mod.x]
+perfConStackedDt <- perfConStackedDt[,c("diff_aucpr", "tf"), with=FALSE]
+perfConStackedDt$ablation <- "Comparison: single vs stacked"
+```
+
+```{r, ablation plots}
+perfAbl <- rbindlist(list(perfConLeaveOutDt, 
+                          perfConMeasureDt,
+                          perfConWeightsDt,
+                          perfConStackedDt))
+perfAbl <- merge(perfAbl, metaTf, by=c("tf"))
+setorder(perfAbl, n_train_context)
+perfAbl[,tf:=factor(tf, levels=unique(perfAbl$tf), ordered=TRUE)]
+perfAbl[,n_train_context:=factor(n_train_context, 
+                                 levels=unique(n_train_context), ordered=TRUE)]
+
+perfAbl[,ablation:=factor(ablation, 
+                          levels=c("Ablated: loco", 
+                                   "Ablated: instance weights", 
+                                   "Comparison: single vs stacked",
+                                   "Comparison: logloss vs aucpr"), 
+                          ordered=TRUE)]
+
+p.abl <- ggplot(perfAbl, aes(x=diff_aucpr, y=tf, color=n_train_context, 
+                             shape=ChromatinOpeningType))+
+         geom_vline(xintercept=0, linetype="dashed")+
+         facet_wrap(~ablation, ncol=2, nrow=2)+
+         stat_summary(size=1.5, linewidth=1)+
+         scale_color_manual(values=cbbPalette)+
+         #scale_color_viridis_d(option="D")+
+         labs(x=expression(Delta*" AUPRC"), y="TF", 
+              #title="Model Component Ablations", 
+              color="Number of \ntraining contexts", 
+              tag="B",
+              shape="Chromatin \nopening type")+
+        theme_sleek()+
+        theme(
+        legend.title=element_text(size=ls),
+        legend.text=element_text(size=14),
+        strip.text=element_text(size=ls),
+        axis.title.x=element_text(size=ls),
+        axis.text.x=element_text(size=ls),
+        axis.text.y=element_text(size=ls),
+        axis.title.y=element_text(size=16),
+        plot.tag=element_text(size=24))
+p.abl
+```
+
+```{r, compare hyperparams}
+hpFiles <- list.files("component_ablations", full.names=TRUE, 
+                        pattern="hyperparams_*")
+hpDt <- lapply(hpFiles, fread)
+names(hpDt) <- basename(hpFiles)
+hpDt <- rbindlist(hpDt, idcol="setting")
+hpDt[,c("val_round", "tf", "tune_hyperparams", 
+        "lo_context", "measure"):=tstrsplit(setting, split="_", keep=2:6, 
+                                            type.convert=TRUE)]
+hpDt[,measure:=gsub(".tsv", "", measure)]
+hpDt[,c("param_setting"):=paste(tune_hyperparams, 
+                                lo_context, measure, sep="_")]
+hpDt <- subset(hpDt, tf %in% selectedTfs)
+hpSubDt <- subset(hpDt, submodel=="all_weighted_pos" & 
+                        measure=="classif.aucpr" &
+                        lo_context==TRUE) 
+hpSubDt <- hpSubDt[,c("val_round", "tf", "tune_hyperparams", 
+                      "num_trees",
+                      "bagging_freq", "feature_fraction", 
+                      "lambda_l1", "lambda_l2", "min_gain_to_split", 
+                      "learning_rate", "num_leaves", 
+                      "num_iterations"), with=FALSE]
+perfSubDt <- subset(perfConDt, submodel=="pred_all_weighted_pos" & 
+                               measure=="classif.aucpr" & 
+                               lo_context==TRUE)
+perfSub2Dt <- perfSubDt[,.(mean_auprc=mean(auc_pr_mod),
+                           median_auprc=median(auc_pr_mod)), 
+                        by=c("tf", "tune_hyperparams", "val_round")]
+hpSubDt <- merge(hpSubDt, 
+                perfSub2Dt, by=c("tf", "tune_hyperparams", "val_round"))
+
+hpSub2Dt <- melt(hpSubDt, id.vars=c("tf", "val_round", "tune_hyperparams"))
+setorder(hpSub2Dt, tf, val_round)
+hpSub2Dt[,tf:=factor(tf, levels=unique(hpSub2Dt$tf), ordered=TRUE)]
+hpSub2Dt[,val_round:=factor(val_round, 
+                            levels=c("valRound1", "valRound2",
+                                     "valRound3"), ordered=TRUE)]
+hpSub2Dt[,tf_val_round:=paste(tf, val_round,sep=".")]
+
+# rename the variables
+hpSub2Dt[,variable:=as.character(variable)]
+hpSub2Dt[,variable:=fifelse(variable=="num_leaves", 
+                            "Number of leaves", variable)]
+hpSub2Dt[,variable:=fifelse(variable=="num_trees", 
+                            "Number of trees", variable)]
+hpSub2Dt[,variable:=fifelse(variable=="num_iterations", 
+                            "Number of iterations", variable)]
+hpSub2Dt[,variable:=fifelse(variable=="learning_rate", 
+                            "Learning rate", variable)]
+hpSub2Dt[,variable:=fifelse(variable=="min_gain_to_split", 
+                            "Min gain for split", variable)]
+hpSub2Dt[,variable:=fifelse(variable=="lambda_l1", 
+                            "Lambda L1", variable)]
+hpSub2Dt[,variable:=fifelse(variable=="lambda_l2", 
+                            "Lambda L2", variable)]
+hpSub2Dt[,variable:=fifelse(variable=="bagging_freq", 
+                            "Bagging frequency", variable)]
+hpSub2Dt[,variable:=fifelse(variable=="mean_auprc", 
+                            "Mean AUPRC", variable)]
+
+
+p.nl <- ggplot(subset(hpSub2Dt, variable=="Number of leaves"), 
+               aes(x=tune_hyperparams,  y=tf_val_round, 
+                   fill=value))+
+  geom_tile()+
+  geom_text(aes(label=round(value, 2)), color="white", size=6)+
+  labs(y="", x="Hyperparameters tuned", fill="Number of leaves", tags="C")+
+  facet_grid(cols=vars(variable), scales="free")+
+  scale_fill_viridis_c()+
+  theme_sleek()+
+  theme(legend.position="none",
+        strip.text=element_text(size=ls),
+        axis.title.x=element_text(size=ls),
+        axis.text.x=element_text(size=ls),
+        axis.text.y=element_text(size=ls),
+        axis.title.y=element_text(size=ls),
+        plot.tag=element_text(size=24)
+        )
+p.nt <- ggplot(subset(hpSub2Dt, variable=="Number of trees"), 
+               aes(x=tune_hyperparams,  y=tf_val_round, 
+                   fill=value))+
+  geom_tile()+
+  geom_text(aes(label=round(value, 2)), color="white", size=6)+
+  labs(y="", x="Hyperparameters tuned", fill="Number of trees")+
+  facet_grid(cols=vars(variable), scales="free")+
+  scale_fill_viridis_c()+
+  theme_sleek()+
+  theme(legend.position="none",
+        strip.text=element_text(size=ls),
+        axis.title.x=element_text(size=ls),
+        axis.text.x=element_text(size=ls),
+        axis.text.y=element_text(size=ls),
+        axis.title.y=element_text(size=ls)
+        )
+p.lr <- ggplot(subset(hpSub2Dt, variable=="Learning rate"), 
+               aes(x=tune_hyperparams,  y=tf_val_round, 
+                   fill=value))+
+  geom_tile()+
+  geom_text(aes(label=round(value, 2)), color="white", size=6)+
+  labs(y="", x="Hyperparameters tuned", fill="Learning rate")+
+  facet_grid(cols=vars(variable), scales="free")+
+  scale_fill_viridis_c()+
+  theme_sleek()+
+  theme(legend.position="none",
+        strip.text=element_text(size=ls),
+        axis.title.x=element_text(size=ls),
+        axis.text.x=element_text(size=ls),
+        axis.text.y=element_text(size=ls),
+        axis.title.y=element_text(size=ls)
+        )
+p.ni <- ggplot(subset(hpSub2Dt, variable=="Number of iterations"), 
+               aes(x=tune_hyperparams,  y=tf_val_round, 
+                   fill=value))+
+  geom_tile()+
+  geom_text(aes(label=round(value, 2)), color="white", size=6)+
+  labs(y="", x="Hyperparameters tuned", fill="Number of iterations")+
+  facet_grid(cols=vars(variable), scales="free")+
+  scale_fill_viridis_c()+
+  theme_sleek()+
+  theme(legend.position="none",
+        strip.text=element_text(size=ls),
+        axis.title.x=element_text(size=ls),
+        axis.text.x=element_text(size=ls),
+        axis.text.y=element_text(size=ls),
+        axis.title.y=element_text(size=ls)
+        )
+p.mg <- ggplot(subset(hpSub2Dt, variable=="Min gain for split"), 
+               aes(x=tune_hyperparams,  y=tf_val_round, 
+                   fill=value))+
+  geom_tile()+
+  geom_text(aes(label=round(value, 2)), color="white", size=6)+
+  labs(y="", x="Hyperparameters tuned", fill="Min gain for split")+
+  facet_grid(cols=vars(variable), scales="free")+
+  scale_fill_viridis_c()+
+  theme_sleek()+
+  theme(legend.position="none",
+        strip.text=element_text(size=ls),
+        axis.title.x=element_text(size=ls),
+        axis.text.x=element_text(size=ls),
+        axis.text.y=element_text(size=ls),
+        axis.title.y=element_text(size=ls)
+        )
+p.l1 <- ggplot(subset(hpSub2Dt, variable=="Lambda L1"), 
+               aes(x=tune_hyperparams,  y=tf_val_round, 
+                   fill=sqrt(value)))+
+  geom_tile()+
+  geom_text(aes(label=round(value, 2)), color="white", size=6)+
+  labs(y="", x="Hyperparameters tuned", fill="Lambda L1")+
+  facet_grid(cols=vars(variable), scales="free")+
+  scale_fill_viridis_c()+
+  theme_sleek()+
+  theme(legend.position="none",
+        strip.text=element_text(size=ls),
+        axis.title.x=element_text(size=ls),
+        axis.text.x=element_text(size=ls),
+        axis.text.y=element_text(size=ls),
+        axis.title.y=element_text(size=ls)
+        )
+p.l2 <- ggplot(subset(hpSub2Dt, variable=="Lambda L2"), 
+               aes(x=tune_hyperparams,  y=tf_val_round, 
+                   fill=sqrt(value)))+
+  geom_tile()+
+  geom_text(aes(label=round(value, 2)), color="white", size=6)+
+  labs(y="", x="Hyperparameters tuned", fill="Lambda L2")+
+  facet_grid(cols=vars(variable), scales="free")+
+  scale_fill_viridis_c()+
+  theme_sleek()+
+  theme(legend.position="none",
+        strip.text=element_text(size=ls),
+        axis.title.x=element_text(size=ls),
+        axis.text.x=element_text(size=ls),
+        axis.text.y=element_text(size=ls),
+        axis.title.y=element_text(size=ls)
+        )
+p.bf <- ggplot(subset(hpSub2Dt, variable=="Bagging frequency"), 
+               aes(x=tune_hyperparams,  y=tf_val_round, 
+                   fill=as.factor(value)))+
+  geom_tile()+
+  geom_text(aes(label=round(value, 2)), colour="white", size=6)+
+  labs(y="", x="Hyperparameters tuned", fill="Bagging frequency")+
+  facet_grid(cols=vars(variable), scales="free")+
+  scale_fill_viridis_d()+
+  theme_sleek()+
+  theme(legend.position="none",
+        strip.text=element_text(size=ls),
+        axis.title.x=element_text(size=ls),
+        axis.text.x=element_text(size=ls),
+        axis.text.y=element_text(size=ls),
+        axis.title.y=element_text(size=ls)
+        )
+
+
+hpSub2Dt[,color_flag:=fifelse(value>0.6, TRUE, FALSE)]
+p.perf <- ggplot(subset(hpSub2Dt, variable=="Mean AUPRC"), 
+               aes(x=tune_hyperparams,  y=tf_val_round, 
+                   fill=value))+
+  geom_tile()+
+  geom_text(aes(label=round(value, 2), colour=color_flag), size=6)+
+  scale_colour_manual(values = c("white", "black"), guide = "none") +
+  labs(y="", x="Hyperparameters tuned", fill="Mean AUPRC")+
+  facet_grid(cols=vars(variable), scales="free")+
+  scale_fill_viridis_c(option="B")+
+  theme_sleek()+
+  theme(legend.position="none",
+        strip.text=element_text(size=ls),
+        axis.title.x=element_text(size=ls),
+        axis.text.x=element_text(size=ls),
+        axis.text.y=element_text(size=ls),
+        axis.title.y=element_text(size=ls))
+        
+
+p.hp <- p.nl+p.nt+p.lr+p.mg+p.l1+p.l2+p.bf+p.perf+plot_layout(axes = "collect", ncol=8)
+p.hp
+```
+
+```{r, combined plot}
+row1 <- (p.full + p.abl) + plot_layout(widths = c(1, 3))
+row2 <- (p.nl+p.nt+p.lr+p.mg+p.l1+p.l2+p.bf+p.perf)+plot_layout(ncol=8, axes = "collect")
+final_plot <- (row1 / free(row2)) +
+plot_layout(axes = "collect", heights = c(1, 1))
+final_plot
+
+#p1 <- (p.full + free(p.abl)+ plot_layout(widths=c(1,3))) 
+
+#p1 <- (p.full + free(p.abl)+ plot_layout(widths=c(1,3))) 
+#plot_grid(p1, p.hp, nrow=2, greedy=FALSE) # rel_heights=c(1,1.2)
+ggsave("supplementary_component_ablations.pdf", width=55, height=40, units="cm", 
+       dpi=150)
+```
+
+```{r, single models comparison}
+hpSubDt <- subset(hpDt, tune_hyperparams &  
+                        measure=="classif.aucpr" & 
+                        lo_context==TRUE)
+hpSubDt <- hpSubDt[,c("val_round", "tf", "tune_hyperparams", 
+                      "num_trees",
+                      "bagging_freq", "feature_fraction", 
+                      "lambda_l1", "lambda_l2", "min_gain_to_split", 
+                      "learning_rate", "num_leaves", 
+                      "num_iterations", "submodel"), with=FALSE]
+perfSubDt <- subset(perfConDt,
+                     measure=="classif.aucpr" & 
+                     tune_hyperparams &
+                     lo_context==TRUE)
+perfSub2Dt <- perfSubDt[,.(mean_auprc=mean(auc_pr_mod),
+                           median_auprc=median(auc_pr_mod)), 
+                        by=c("tf", "val_round", 
+                             "submodel")]
+perfSub2Dt[,submodel:=gsub("pred_", "", submodel)]
+hpSubDt <- merge(hpSubDt, 
+                 perfSub2Dt, by=c("tf", 
+                                  "val_round", "submodel"))
+hpSubDt <- subset(hpSubDt, tune_hyperparams)
+hpSub2Dt <- melt(hpSubDt, 
+                 id.vars=c("tf", "val_round",  "submodel"))
+setorder(hpSub2Dt, tf, val_round)
+hpSub2Dt[,tf:=factor(tf, levels=unique(hpSub2Dt$tf), ordered=TRUE)]
+hpSub2Dt[,val_round:=factor(val_round, 
+                            levels=c("valRound1", "valRound2",
+                                     "valRound3"), ordered=TRUE)]
+hpSub2Dt[,tf_val_round:=paste(tf, val_round,sep=".")]
+
+# rename the variables
+hpSub2Dt[,variable:=as.character(variable)]
+hpSub2Dt[,variable:=fifelse(variable=="num_leaves", 
+                            "Number of leaves", variable)]
+hpSub2Dt[,variable:=fifelse(variable=="num_trees", 
+                            "Number of trees", variable)]
+hpSub2Dt[,variable:=fifelse(variable=="num_iterations", 
+                            "Number of iterations", variable)]
+hpSub2Dt[,variable:=fifelse(variable=="learning_rate", 
+                            "Learning rate", variable)]
+hpSub2Dt[,variable:=fifelse(variable=="min_gain_to_split", 
+                            "Min gain for split", variable)]
+hpSub2Dt[,variable:=fifelse(variable=="lambda_l1", 
+                            "Lambda L1", variable)]
+hpSub2Dt[,variable:=fifelse(variable=="lambda_l2", 
+                            "Lambda L2", variable)]
+hpSub2Dt[,variable:=fifelse(variable=="bagging_freq", 
+                            "Bagging frequency", variable)]
+hpSub2Dt[,variable:=fifelse(variable=="mean_auprc", 
+                            "Mean AUPRC", variable)]
+hpSub2Dt[,scaled_var:=scale(value), by=.(variable, tf_val_round)]
+hpSub2Dt[,submodel_text:=fifelse(submodel=="stacked",
+                                    "stacked", submodel)]
+hpSub2Dt[,submodel_text:=fifelse(submodel=="top_weighted_pos",
+                                   "single: top weight peaks", submodel_text)]
+hpSub2Dt[,submodel_text:=fifelse(submodel=="med_weighted_pos",
+                                   "single: top & med weight peaks", submodel_text)]
+hpSub2Dt[,submodel_text:=fifelse(submodel=="all_weighted_pos",
+                                   "single: all weighted peaks", submodel_text)]
+hpSub2Dt[,submodel_text:=fifelse(submodel=="all_pos",
+                                   "single: all peaks", submodel_text)]
+hpSub2Dt[,submodel_text:=factor(submodel_text, 
+                                  levels=c("single: top weight peaks", 
+                                           "single: top & med weight peaks", 
+                                           "single: all weighted peaks", 
+                                           "single: all peaks", 
+                                           "stacked"))]
+
+p.nl <- ggplot(subset(hpSub2Dt, variable=="Number of leaves"), 
+               aes(x=submodel_text,  y=tf_val_round, 
+                   fill=value))+
+  geom_tile()+
+  geom_text(aes(label=round(value, 2)), color="white")+
+  labs(y="", x="Single model", fill="Number of leaves", tags="C")+
+  facet_grid(cols=vars(variable), scales="free")+
+  scale_fill_viridis_c(trans="sqrt")+
+  #scale_x_discrete(guide = guide_axis(n.dodge=))+
+  theme_sleek()+
+  theme(legend.position="none",
+        axis.text.x=element_text(hjust=1, angle=45),
+        axis.title.x=element_blank(),
+        strip.text=element_text(size=10),
+        axis.text.y=element_text(size=10),
+        axis.title.y=element_text(size=10))
+p.nl
+p.nt <- ggplot(subset(hpSub2Dt, variable=="Number of trees"), 
+               aes(x=submodel_text,  y=tf_val_round, 
+                   fill=value))+
+  geom_tile()+
+  geom_text(aes(label=round(value, 2)), color="white", size=4)+
+  labs(y="", x="Single model", fill="Number of trees")+
+  facet_grid(cols=vars(variable), scales="free")+
+  scale_fill_viridis_c(trans="sqrt")+
+  #scale_x_discrete(guide = guide_axis(n.dodge=3))+
+  theme_sleek()+
+  theme(legend.position="none",
+        axis.text.x=element_text(hjust=1, angle=45, size=10),
+        axis.title.x=element_blank(),
+        strip.text=element_text(size=10),
+        axis.text.y=element_text(size=10),
+        axis.title.y=element_text(size=10))
+p.nt
+p.lr <- ggplot(subset(hpSub2Dt, variable=="Learning rate"), 
+               aes(x=submodel_text,  y=tf_val_round, 
+                   fill=value))+
+  geom_tile()+
+  geom_text(aes(label=round(value, 2)), color="white", size=4)+
+  labs(y="", x="Single model", fill="Learning rate")+
+  facet_grid(cols=vars(variable), scales="free")+
+  scale_fill_viridis_c(trans="sqrt")+
+  #scale_x_discrete(guide = guide_axis(n.dodge=3))+
+  theme_sleek()+
+  theme(legend.position="none",
+        axis.text.x=element_text(hjust=1, angle=45, size=10),
+        axis.title.x=element_blank(),
+        strip.text=element_text(size=10),
+        axis.text.y=element_text(size=10),
+        axis.title.y=element_text(size=10))
+p.lr
+
+hpSub2Dt[,color_flag:=fifelse(value>0.6, TRUE, FALSE)]
+p.perf <- ggplot(subset(hpSub2Dt, variable=="Mean AUPRC"), 
+               aes(x=submodel_text,  y=tf_val_round, 
+                   fill=value))+
+  geom_tile()+
+  geom_text(aes(label=round(value, 2), colour=color_flag), size=4)+
+  scale_colour_manual(values = c("white", "black"), guide = "none") +
+  labs(y="", x="Single model", fill="Mean AUPRC")+
+  facet_grid(cols=vars(variable), scales="free")+
+  scale_fill_viridis_c(option="B")+
+  #scale_x_discrete(guide = guide_axis(n.dodge=3))+
+  theme_sleek()+
+  theme(legend.position="none",
+        axis.text.x=element_text(hjust=1, angle=45, size=10),
+        axis.title.x=element_blank(),
+        strip.text=element_text(size=10),
+        axis.text.y=element_text(size=10),
+        axis.title.y=element_text(size=10))
+
+perfSub2Dt[,tf_val_round:=paste(tf, val_round, sep=".")]
+perfSub2Dt[,rank:=frank(mean_auprc), by=.(tf_val_round)]
+perfSub2Dt[,z_score:=(mean_auprc-mean(mean_auprc))/sd(mean_auprc), by=.(tf_val_round)]
+perfSub2Dt[,submodel_text:=fifelse(submodel=="stacked",
+                                    "stacked", submodel)]
+perfSub2Dt[,submodel_text:=fifelse(submodel=="top_weighted_pos",
+                                   "single: top weight peaks", submodel_text)]
+perfSub2Dt[,submodel_text:=fifelse(submodel=="med_weighted_pos",
+                                   "single: top & med weight peaks", submodel_text)]
+perfSub2Dt[,submodel_text:=fifelse(submodel=="all_weighted_pos",
+                                   "single: all weighted peaks", submodel_text)]
+perfSub2Dt[,submodel_text:=fifelse(submodel=="all_pos",
+                                   "single: all peaks", submodel_text)]
+perfSub2Dt[,submodel_text:=factor(submodel_text, 
+                                  levels=c("single: top weight peaks", 
+                                           "single: top & med weight peaks", 
+                                           "single: all weighted peaks", 
+                                           "single: all peaks", 
+                                           "stacked"))]
+p.perf.box <- ggplot(perfSub2Dt, aes(x=submodel_text, y=z_score, 
+                                     color=submodel_text))+
+  geom_boxplot(size=1)+
+  scale_color_manual(values=cbbPalette)+
+  labs(tags="B", x="Model", y="z-score (AUPRC)", 
+       color="Model")+
+  #guides(color = guide_legend(nrow = 2))+
+  scale_x_discrete(guide = guide_axis(n.dodge=3))+
+  theme_sleek()+
+  theme(axis.title.x=element_blank(),
+        strip.text=element_text(size=10),
+        legend.text=element_text(size=10, face="plain"),
+        legend.title=element_text(size=10, face="plain"),
+        axis.text.x=element_text(size=10),
+        axis.text.y=element_text(size=10),
+        axis.title.y=element_text(size=10))
+
+scheme <- magick::image_read_pdf("../schemes/stacked_trees.pdf")
+scheme <- magick::image_ggplot(scheme) + 
+    labs(tag="A") +
+    theme_nothing()+
+    theme(plot.tag=element_text(face="bold", size=16), 
+          axis.title.y=element_blank(), 
+          axis.text.y=element_blank())
+
+p2 <- p.nl+p.nt+p.lr+p.perf+plot_layout(axes="collect", nrow=1)
+plot_grid((scheme+p.perf.box),p2, nrow=2, rel_heights=c(1,1))
+ggsave("supplementary_stacking.pdf", width=30, height=30, units="cm", dpi=150)
+```
+
+```{r}
+sessionInfo()
+```

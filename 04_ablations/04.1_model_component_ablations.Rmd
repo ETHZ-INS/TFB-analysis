@@ -18,7 +18,9 @@ set.seed(seed)
 ```
 
 ```{r, setup data}
-selectedTfs <- c("ATF3", "NR3C1", "MEF2C", "MYC", "ZNF143", "MAX", "JUN", "SOX6")
+selectedTfs <- c("ELF1", "SMAD1",  # pioneers
+                 "USF2", "ZNF292", # settlers
+                 "FOS", "MEF2D") # migrants
 holdOutChr <- c("chr2", "chr4", "chr9")
 ```
 

@@ -1,0 +1,257 @@
+---
+title: "04.2 Feature additions"
+output: html_document
+---
+
+```{r, setup}
+suppressPackageStartupMessages({
+library(BiocParallel)
+library(BSgenome.Hsapiens.UCSC.hg38)
+library(TFBlearner)})
+
+seed <- 42 # params$seed
+set.seed(seed)
+setDTthreads(8)
+```
+
+```{r, setup data}
+selectedTfs <- c("ELF1", "SMAD1", # pioneers
+                 "USF2", "ZNF292", # settlers
+                 "FOS", "MEF2D") # migrants
+holdOutChr <- c("chr2", "chr4", "chr9")
+```
+
+```{r, inputs}
+mae <- readRDS("../data/05_maeAll_conFeat_sub.rds") 
+cofactors <- readRDS("../data/meta_data/topInteractors.rds")
+outDir <- "feature_additions"
+if(!dir.exists(outDir)) dir.create(outDir)
+```
+
+```{r, remove test data}
+cols <- lapply(experiments(mae), function(n) {
+        colnames(n)[colnames(n) %in% unique(subset(sampleMap(mae), 
+            !isTesting)$colname)]})
+mae <- subsetByColumn(mae, cols)
+```
+
+```{r, define feature groups}
+nFold <- 3
+featGroups <- fread("../08_meta/tfbs_feature_group_updated.csv")
+baseFeats <- c("contextFeat_total.overlaps_normed", 
+               "contextFeat_total.overlaps_normedGC",
+               "tfFeat_motifMatch_tfMotif_1", 
+               "context", "contextTfFeat_label")
+featGroupsAdd <- subset(featGroups, !(`Fine-grained feature group` %in% baseFeats))
+featGroupsAdd <- split(subset(featGroupsAdd, !(`Larger group` %in% baseFeats)), 
+                       by="Larger group")
+fns <- lapply(names(featGroupsAdd), function(fn) gsub(" ", "_", fn))
+names(featGroupsAdd) <- unlist(fns)
+
+predCols <- c(paste(TFBlearner:::PREDPREFIX, TFBlearner:::MODELNAMES, sep="_"),
+              paste(TFBlearner:::PREDPREFIX, TFBlearner:::MODELSTACKEDSUFFIX, sep="_"))
+```
+
+```{r, ablation rounds}
+auprAllDt <- data.table()
+hpAllDt <- data.table()
+for(tf in selectedTfs){
+  contexts <- getContexts(mae, tfName=tf, which="Both")
+  nHoldOut <- ceiling(length(contexts)/nFold)
+  folds <-  seq(1,length(contexts), nHoldOut)
+  
+  combFiles <- expand.grid(paste0("valRound", 1:length(folds)), tf,
+                           names(featGroupsAdd), stringsAsFactors=FALSE)
+  combFiles <- lapply(1:nrow(combFiles), function(l) paste(combFiles[l,], collapse="_"))
+  combFiles <- unlist(combFiles)
+  
+  outFiles1 <- file.path(outDir, paste0("performance_component_ablation_", combFiles, ".tsv"))
+  outFiles2 <- file.path(outDir, paste0("hyperparams_", combFiles, ".tsv"))
+  
+  if(all(file.exists(outFiles1)) & all(file.exists(outFiles2))) next
+  
+  tfCofactors <- unique(cofactors[[tf]])
+  experiments(mae)$tfFeat <- NULL
+  experiments(mae)$contextTfFeat <- NULL
+  
+  # Compute the tf-specific features
+  mae <- tfFeatures(mae, 
+                    tfName=tf,
+                    tfCofactors=tfCofactors,
+                    nPatterns=40,
+                    seed=seed)
+  
+  # load the profile (based on profileMap)
+  # TODO: here!
+  profile <- NULL
+  mae <- contextTfFeatures(mae, tfName=tf, 
+                           whichCol="OnlyTrain",
+                           features=c("Inserts", 
+                                      "Weighted_Inserts", 
+                                      "ChromVAR_Scores"),
+                           addLabels=TRUE, 
+                           seed=seed,
+                           profiles=profile)
+  
+  saveHdf5 <- fifelse(length(contexts)>1, TRUE, FALSE)
+  fm <- getFeatureMatrix(mae, tfName=tf, 
+                         addLabels=TRUE, 
+                         whichCol="OnlyTrain", 
+                         norm="robust", 
+                         convertInteger=FALSE,
+                         saveHdf5=saveHdf5, 
+                         prefix="feature_additions")
+
+  rangesFm <- rowRanges(fm)
+  rangeDt <- as.data.table(rangesFm)
+  rangeDt[,row_id:=1:.N]
+
+  holdOutInd <- subset(rangeDt, seqnames %in% holdOutChr)$row_id
+  holdOutRanges <- rangesFm[holdOutInd]
+
+  # subset to autosomes
+  trainInd <- subset(rangeDt, seqnames %in% paste0("chr", 1:22))$row_id
+  trainInd <- setdiff(trainInd, holdOutInd)
+  trainRanges <- rangesFm[trainInd]
+
+  fmTrain <- IRanges::subsetByOverlaps(fm, trainRanges, type = "equal")
+  fmValChrs <- IRanges::subsetByOverlaps(fm, holdOutRanges, type = "equal")
+  
+  if(nrow(fmValChrs)>4e6){
+    fmValChrs <- fmValChrs[sample(1:nrow(fmValChrs), 4e6),]  
+  }else{
+    fmValChrs <- fmValChrs
+  }
+  assays(fmValChrs)$features <- TFBlearner:::.convertToMatrix(assays(fmValChrs)$features)
+  
+  for(l in folds){
+    
+    # determine holdout
+    seqRound <- which(folds==l)
+    message(paste("Validation round:", seqRound))
+    valItContexts <- contexts[l:min((l+nHoldOut-1),length(contexts))]
+    
+    # subset feature matrix
+    fmValIt <- fmTrain[which(rowData(fmTrain)$context %in% valItContexts),]
+    fmValChrsIt <- fmValChrs[which(!(rowData(fmValChrs)$context %in% valItContexts)),]
+    assays(fmValChrsIt)$features <- TFBlearner:::.convertToMatrix(assays(fmValChrsIt)$features)
+    fmTrainIt <- fmTrain[which(!(rowData(fmTrain)$context %in% valItContexts)),]
+
+    # ablate components of model
+    for(featureGroup in c("base", names(featGroupsAdd))){
+      outFile1 <- file.path(outDir, paste("performance_feature_additions", 
+                                    paste0("valRound", seqRound),  tf, 
+                                    paste0(featureGroup, ".tsv"),
+                                                         sep="_"))
+      outFile2 <- file.path(outDir, paste("hyperparams", 
+                                    paste0("valRound", seqRound), tf, 
+                                    paste0(featureGroup, ".tsv"),
+                                                         sep="_"))
+      outFilePred <- file.path(outDir, paste("preds", 
+                                       paste0("valRound", seqRound), tf, 
+                                       paste0(featureGroup, ".tsv"),
+                                                            sep="_"))
+      
+      
+      if(file.exists(outFile1) & file.exists(outFile2)) next
+      # get the feature matrix column names
+      if(featureGroup=="base"){
+        colNamesSub <- baseFeats
+        colNamesAdd <- "only.base"
+      }
+      else{
+        featsToAdd <- featGroupsAdd[[featureGroup]]$`Fine-grained feature group`
+        colNamesAdd <- lapply(unlist(featsToAdd), function(feature){
+                              feature <- gsub("tfMotif", "tfMotif_1", feature)
+                              colnames(fmTrainIt)[grepl(feature,colnames(fmTrainIt))]})
+        colNamesSub <- unique(c(unlist(colNamesAdd), baseFeats))}
+
+      # subset to feature group
+      fmValIt2 <- fmValIt[,colNamesSub]
+      fmValChrsIt2 <- fmValChrsIt[,colNamesSub]
+      fmTrainIt2 <- fmTrainIt[,colNamesSub]
+
+      mods <- trainTfModel(tfName=tf,
+                           fm=fmTrainIt2,
+                           measureName="classif.aucpr",
+                           evalRounds=100,
+                           earlyStoppingRounds=5,
+                           tuneHyperparams=TRUE,
+                           loContext=TRUE,
+                           stackingStrat="wMean", 
+                           seed=seed,
+                           numThreads=8,
+                           BPPARAM=SerialParam())
+      
+      predsValCon <- predictTfBinding(mods, fmValIt2, chunk=1e6, 
+                                      simplified=FALSE, 
+                                      BPPARAM=SerialParam())
+      predsValCon <- as.data.table(as.matrix(predsValCon[predsValCon[,TFBlearner:::BINLABELNAME]>=0,]))
+      prVal <- lapply(predCols, TFBlearner:::.getPRCurve, 
+                      dt=predsValCon, 
+                      labels=TFBlearner:::BINLABELNAME, models="context", 
+                      posClass=1, negClass=0, subSample=FALSE, 
+                      aggregate=TRUE, seed=seed)
+      names(prVal) <- predCols
+      prVal <- rbindlist(prVal, idcol="submodel")
+      prVal$tfName <- tf
+      prVal$pos_frac <- sum(predsValCon[[TFBlearner:::BINLABELNAME]])/nrow(predsValCon)
+      prVal$computed <- "val_context"
+      prVal$holdout_context <- paste(valItContexts, collapse=".")
+      prVal$training_context <- paste(setdiff(contexts, valItContexts), collapse=".")
+          
+      # predict also for validation chromosomes
+      predsValChr <- predictTfBinding(mods, fmValChrsIt2, chunk=NULL, 
+                                          simplified=FALSE, 
+                                          BPPARAM=SerialParam())
+      predsValChr <- as.data.table(as.matrix(predsValChr[predsValChr[,TFBlearner:::BINLABELNAME]>=0,]))
+      prValChr <- lapply(predCols, TFBlearner:::.getPRCurve, 
+                         dt=predsValChr, 
+                         labels=TFBlearner:::BINLABELNAME, models="context", 
+                         posClass=1, negClass=0, subSample=FALSE, 
+                         aggregate=TRUE, seed=seed)
+      names(prValChr) <- predCols
+      prValChr <- rbindlist(prValChr, idcol="submodel")
+      prValChr$tfName <- tf
+      prValChr$pos_frac <- sum(predsValChr[[TFBlearner:::BINLABELNAME]])/nrow(predsValChr)
+      prValChr$computed <- "val_chromosomes"
+      prValChr$holdout_context <- paste(valItContexts, collapse=".")
+      prValChr$training_context <- paste(setdiff(contexts, valItContexts), collapse=".")
+      
+      predsValCon$tfName <- tf
+      predsValCon$holdout_context <- paste(valItContexts, collapse=".")
+      predsValCon$training_context <- paste(setdiff(contexts, valItContexts), collapse=".")
+      write.table(predsValCon, file=outFilePred,
+                  quote=FALSE, row.names=FALSE, sep="\t")
+      
+      # bind iteration results and save
+      auprDt <- rbind(prVal, prValChr, use.names=TRUE, fill=TRUE)
+      auprDt$base_feats <-  paste(baseFeats, collapse="/")
+      auprDt$added_feature_group <- featureGroup
+      auprDt$added_feature_names <- paste(unlist(colNamesAdd), collapse="/")
+      write.table(auprDt, file=outFile1,
+                  quote=FALSE, row.names=FALSE, sep="\t")
+          
+      hpDts <- lapply(mods[TFBlearner:::MODELNAMES], function(m){
+            params <- m$params[setdiff(names(m$params), 
+                                       c("preselMotif", "preselActMotif", 
+                                         "interaction_constraints", "metric"))]
+            paramDt <- as.data.table(params)
+            paramDt$num_iter <- m$num_iter()  
+            paramDt$num_trees <- m$num_trees()
+            paramDt
+          })
+      hpDt <- rbindlist(hpDts, idcol="submodel")
+      hpDt$base_feats <- paste(baseFeats, collapse="/")
+      hpDt$added_feature_group <- featureGroup
+      hpDt$added_feature_names <- paste(unlist(colNamesAdd), collapse="/")
+      write.table(hpDt, file=outFile2,
+                  quote=FALSE, row.names=FALSE, sep="\t")
+    }
+  }
+}
+```
+
+```{r}
+sessionInfo()
+```

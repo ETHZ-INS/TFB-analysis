@@ -1,0 +1,151 @@
+---
+title: "Prepare words per DHS"
+output: html_document
+date: "2025-04-02"
+---
+
+```{r setup}
+suppressPackageStartupMessages({
+  library(GenomicRanges)
+  library(data.table)
+  library(BSgenome.Hsapiens.UCSC.hg38)
+  library(MultiAssayExperiment)
+})
+source("../removeOverlappingRanges.R")
+
+# LOCATION OF THE MEA object:
+mae <- "/mnt/nvme1/analysis/data/01_maeAll.rds"
+
+setDTthreads(2)
+fromScratch <- TRUE
+```
+
+```{r}
+mae <- readRDS(mae)
+chip <- experiments(mae)$ChIP
+holdout_celltypes <- mae$context[which(mae$isTesting)]
+```
+
+
+```{r, eval=FALSE}
+if(fromScratch){
+  dhs <- readRDS("../../01_consensus_regions/hybrid.custom.hg38.resized.resplit.rds")
+  dhs <- resize(dhs, width=1000L, fix="center")
+  export.bed(granges(dhs), "consensus_regions.bed")
+}
+```
+
+Extract archetype matches that overlap our consensus regions.
+
+```{bash, eval=FALSE}
+zcat ../hg38.archetype_motifs.v1.0.bed.gz | intersectBed -u -f 0.9 -a - -b consensus_regions.bed | cut -f 1-3 > archetypes_in_consensus.bed
+gzip archetypes_in_consensus.bed
+```
+
+Extract motif-based words (collapsed with their reverse complements) :
+
+```{r}
+if(fromScratch){
+  b <- fread("archetypes_in_consensus.bed.gz")
+  b <- GRanges(b$V1, IRanges(b$V2, b$V3), score=as.integer(round(100*b$V4)))
+  # whenever two matches overlap by more than 4nt, keep only the one with the highest score:
+  b <- resize(b, 4L, fix="center")
+  b <- b[order(seqnames(b),-b$score),]
+  b <- removeOverlappingRanges(b)
+  b <- resize(b, 8L, fix="center")
+  b <- sort(b)
+  b$score <- NULL
+  # extract sequences, and merge levels of reverse complements:
+  b$seq <- getSeq(BSgenome.Hsapiens.UCSC.hg38, b)
+  uSeqs <- unique(b$seq)
+  rc <- reverseComplement(DNAStringSet(uSeqs))
+  uSeqs2 <- unique(sort(as.character(c(uSeqs,rc))))
+  b$seq <- factor(as.character(b$seq), levels=uSeqs2)
+  rc <- reverseComplement(DNAStringSet(uSeqs2))
+  # keep only the alphabetically prior of the seq or its reverse complement:
+  m <- t(apply(cbind(uSeqs2, as.character(rc)),1,FUN=sort))
+  m <- as.data.frame(m)
+  m <- m[!duplicated(m),]
+  conv <- setNames(m[,1],m[,2])
+  w <- which(levels(b$seq) %in% names(conv))
+  levels(b$seq)[w] <- conv[levels(b$seq)[w]]
+  # remove words/sequences that are seen very rarely:
+  wordUsage <- table(b$seq)
+  quantile(wordUsage, p=(0:10)/10)
+  rareWords <- names(wordUsage)[wordUsage<30]
+  b <- b[!(b$seq %in% rareWords)]
+  b$seq <- droplevels(b$seq)
+  saveRDS(b, "coord_and_words_in_consensus.GR.rds")
+}
+```
+
+```{r}
+if(fromScratch){
+  # assign words to consensus regions:
+  dhs <- rtracklayer::import.bed("consensus_regions.bed")
+  o <- findOverlaps(b, dhs, minoverlap=6L)
+  words_per_dhs <- unique(splitAsList(b$seq[from(o)], to(o)))
+  quantile(lengths(words_per_dhs), p=(0:10)/10)
+  dhs <- dhs[unique(to(o))]
+  dhs$words <- words_per_dhs
+  saveRDS(dhs, file="dhs_with_words.GR.rds")
+}
+```
+
+# Get ChIP-based labels
+
+```{r}
+dhs <- readRDS("dhs_with_words.GR.rds")
+assay(chip) <- as(assay(chip),"dgCMatrix")>0.2
+o <- findOverlaps(chip,dhs,minoverlap=25L)
+# remove hold-out celltypes
+chip <- chip[from(o),which(!(chip$context %in% holdout_celltypes))]
+dhs <- dhs[to(o)]
+
+nPeaks <- rowSums(assay(chip))
+wTrain <- which(nPeaks>2)
+
+trainChip <- as(assay(chip)[wTrain,],"lgTMatrix")
+train <- dhs[wTrain]
+train$hasTF <- unique(splitAsList(as.integer(
+  as.factor(chip$tfName)[trainChip@j+1L]),
+                         trainChip@i))
+nTf <- lengths(train$hasTF)
+# remove too crowded regions and subsample deterministically
+w <- which(nTf<120 & nTf>4)
+w <- w[3*seq_len(floor((length(w)-1)/3))]
+train <- train[w]
+
+writeLines(paste(train$words, collapse=" "), "train_words")
+writeLines(paste(relist(paste0("__label__",unlist(train$hasTF)), train$hasTF), collapse=" "), "train_labels")
+
+dhs <- readRDS("dhs_with_words.GR.rds")
+writeLines(paste(dhs$words, collapse=" "), "all_words")
+```
+
+```{bash train}
+paste -d" " train_words train_labels > train.txt
+/common/Starspace/starspace train -trainMode 0 -trainFile train.txt -model model.dim10.epoch100 -minCount 15 -dim 10 -lr 0.1 -maxNegSamples 20 -epoch 100 -thread 40
+/common/Starspace/embed_doc model.dim10.epoch100 all_words | grep -E '^[0-9-]' > embeding10
+```
+
+
+```{r}
+em <- fread("embeding10")
+em <- round(1000*as.matrix(as.data.frame(em)))
+mode(em) <- "integer"
+
+# add the few regions without any known kmer
+dhs1 <- readRDS("dhs_with_words.GR.rds")
+dhs <- rtracklayer::import.bed("consensus_regions.bed")
+o <- findOverlaps(dhs1, dhs, minoverlap=25L)
+
+em2 <- matrix(0L, nrow=length(dhs), ncol=ncol(em))
+em2[unique(to(o)),] <- em
+row.names(em2) <- as.character(granges(dhs))
+saveRDS(em2, file="embedding10.rds")
+
+um <- as.data.frame(uwot::umap(em, n_neighbors=30, nn_method="annoy", metric="cosine"))
+saveRDS(um, "embedding_umap.rds")
+```
+

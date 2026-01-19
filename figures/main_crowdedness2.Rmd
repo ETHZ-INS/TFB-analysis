@@ -1,0 +1,81 @@
+---
+title: "main_crowdedness2"
+output: html_document
+---
+
+```{r}
+suppressPackageStartupMessages({
+  library(ggplot2)
+  library(cowplot)
+  library(ggsignif)
+  library(patchwork)
+  library(grImport2)
+  library(ggplotify)
+})
+source("../utils/load_all.R", chdir = TRUE)
+```
+
+# Scheme
+
+```{r}
+schemes <- setNames(paste0("crowding_hypotheses_",1:3,".png"),
+                    c("Dynamic alternation", "Indirect binding\nvia scaffoling",
+                      "Tethered via 3D\nchromatin interactions"))
+schemes <- lapply(names(schemes), \(n){
+  ggdraw() + draw_image(schemes[n], x = 0.5, y = 0, hjust = 0.5, vjust = 0) +
+    theme_sleek() + ggtitle(n) + theme(plot.title=element_text(hjust=0.5))
+})
+(p.schemes <- plot_grid(plotlist=schemes, nrow=1))
+```
+
+
+# Nb 3D links in crowded vs non-crowded promoters
+
+```{r}
+d <- readRDS("../09_crowdedness/Nb_3D_links_crowded_vs_non.rds")
+p1 <- ggplot(d, aes(set, 1L+nL)) + facet_wrap(~celltype, nrow=1) + geom_violin(fill="lightblue") + 
+  stat_summary(fun.data=mean_se) + theme_sleek() + theme(axis.text.x=element_text(angle=90, vjust=0.5, hjust=1)) +
+  scale_y_log10(breaks=c(1,10^(1:3)-1), label=c(0,10^(1:3))) + #, limits=c(NA,2500)) + 
+  labs(x="Set of promoters", y="Number of PREs\nin 3D contact") + 
+   geom_signif(comparisons = list(c("crowded", "matched\nnon-crowded")), textsize = 3, tip_length=0, margin_top = 0.01)
+```
+
+# do distal peaks explain promoter peaks?
+
+```{r}
+res <- readRDS("../09_crowdedness/TFs_atCrowdedProms_explained_by_contacts_all.rds")
+res1 <- res[which(res$crwd>=0.4),]
+
+res2 <- reshape2:::melt.data.frame(res, id.vars=c("gene","celltype", "crwd"), measure.vars=c("p.true", "meanMatched"))
+res2$variable <- relevel(res2$variable, "meanMatched")
+levels(res2$variable) <- c("random PREs\nwith matched\n# peaks", "true distal\nPREs")
+
+p2 <- ggplot(res2[which(res2$crwd>=0.4),], aes(variable, 100*value)) + theme_sleek() +
+  geom_violin(fill="#00bfc4") + geom_point(size=1) + stat_summary(fun.data = mean_se, color="red") +
+  labs(y="Proportion of TFs at crowded promoters\nexplained by distal PREs",
+       x=NULL) + coord_flip() +
+  scale_y_continuous(breaks=c(0,50,100), labels=c("0%","50%","100%"), lim=c(0,110)) +
+  geom_segment(data=res1, aes(x=2, xend=1, y=100*p.true, yend=100*meanMatched), alpha=0.25) +
+  geom_signif( comparisons = list(levels(res2$variable)),
+               test.args=list(paired=TRUE, alternative="less"), margin_top=0.07, textsize = 3)
+
+p3 <- ggplot(res2[res2$crwd>0.2,], aes(100*value, variable)) + theme_sleek() + facet_wrap(~celltype) +
+  geom_violin(fill="#00bfc4") + geom_boxplot(outliers = FALSE, width=0.1) + 
+  labs(x="Proportion of TFs at promoters explained by distal PREs", y=NULL) +
+  scale_x_continuous(breaks=c(0,50,100), labels=c("0%","50%","100%"), lim=c(0,110)) +
+  geom_signif( comparisons = list(levels(res2$variable)),
+               test.args=list(paired=TRUE, alternative="less"), margin_top=0.07, textsize = 3)
+```
+
+
+```{r, fig.width=10, fig.height=9.5}
+pdf("main_crowdedness2.pdf", width=10, height=9.5)
+plot_grid(
+  plot_grid(p.schemes, labels="A", scale=0.95),
+  plot_grid(p1, scale=0.95, labels="B"),
+  plot_grid(p2, p3, scale=0.95, labels=LETTERS[3:4], nrow=1, rel_widths=c(3,5)),
+  nrow=3, rel_heights=c(2.5,5,4)
+)
+dev.off()
+```
+

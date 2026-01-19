@@ -1,0 +1,82 @@
+---
+title: "supp_DTFA"
+output: html_document
+---
+
+```{r}
+suppressPackageStartupMessages({
+  library(ComplexHeatmap)
+  library(ggplot2)
+  library(cowplot)
+  library(patchwork)
+  library(sechm)
+})
+source("../utils/load_all.R", chdir = TRUE)
+```
+
+```{r}
+TFlists <- readRDS("../07_DTFA/fromRNA/Nakatake2020/TFlists.rds")
+```
+
+
+```{r}
+res <- readRDS("../07_DTFA/fromRNA/Nakatake2020/results.rds")
+tt <- as.data.frame(t(sapply(res, \(x) colSums(x$summary[,1:4]))))
+tt <- tt[order(-tt$inTop10/tt$isAnnotated),]
+tt <- tt[grep("log2FC", row.names(tt)),]
+row.names(tt) <- gsub("res_log2FC_","",row.names(tt))
+sel <- c("predsReweigh.raw", "preds.raw", "collecTRI", "motifs.raw")
+tt2 <- tt[sel,]
+tt2$method <- newNames <- c("Predictions\n(re-weighed)", "Predictions\n(raw)","collecTRI", "Motifs")
+tt2$propTop10 <- tt2$inTop10/tt2$isAnnotated
+
+colors2 <- c(Motifs = "#0072B2", "Predictions\n(re-weighed)" = "#E69F00", "Predictions\n(raw)" = "#D55E00",
+             collecTRI = "#CC79A7")
+
+p1 <- ggplot(tt2, aes(reorder(method, -inTop10), inTop10, fill=method)) + geom_col() + theme_sleek() + 
+  labs(y="Number of perturbations\ndetected (in top 10)", x=NULL) +
+  ggplot(tt2, aes(reorder(method, -propTop10), propTop10, fill=method)) + geom_col() + theme_sleek() + 
+  labs(y="Proportion of annotated\nTFs detected (in top 10)", x=NULL) + plot_layout(guides="collect") &
+  scale_fill_manual(values=colors2) & theme(axis.text.x=element_text(angle=90, hjust=1, vjust=0.5)) &
+  labs(fill="Method")
+```
+
+```{r}
+identified <- lapply(res, \(x) names(which(rowSums(x$summary[,1:2])>0)))
+identified <- identified[grep("logCPM", names(identified))]
+names(identified) <- gsub("res_logCPM_","",names(identified))
+identified <- identified[sel]
+names(identified) <- newNames
+notInCollecTRI <- unique(setdiff(unlist(identified), identified$collecTRI))
+```
+
+```{r}
+se <- readRDS("../07_DTFA/fromRNA/Nakatake2020/res_logCPM_predsReweigh.raw.fastMLM.SE.rds")
+se2 <- readRDS("../07_DTFA/fromRNA/Nakatake2020/res_logCPM_collecTRI.fastMLM.SE.rds")
+se <- log2FC(se, fromAssay = "a", controls=se$condition=="Control")
+se2 <- log2FC(se2, fromAssay = "a", controls=se$condition=="Control")
+d <- meltSE(se, intersect(notInCollecTRI, TFlists$collecTRI))
+d <- d[which(d$feature == d$perturbation),]
+d2 <- meltSE(se2, intersect(notInCollecTRI, TFlists$collecTRI))
+d2 <- d2[which(d2$feature == d2$perturbation),]
+d2$method <- "collecTRI"
+d$method <- "Predictions\n(re-weighed)"
+dm <- rbind(d[which(d$condition!="Control"),colnames(d2)],d2[which(d2$condition!="Control"),])
+
+cols <- c("Predictions\n(re-weighed)" = "#E69F00", collecTRI = "#CC79A7")
+
+sel <- c("CEBPB", "EGR1", "ELK1", "REST", "USF1")
+
+p3 <- ggplot(dm[which(dm$feature %in% sel),], aes(feature, log2FC, fill=method, color=method)) + 
+    geom_boxplot() + theme_sleek() + theme(axis.text.x=element_text(angle=90, hjust=1, vjust=0.5)) +
+    geom_hline(yintercept=0, linetype="dashed") + 
+  scale_color_manual(values=cols) + scale_fill_manual(values=cols) +
+    labs(subtitle="Example perturbations poorly detected by collecTRI, despite a regulon defined for the TF",
+         x="Perturbed TF")
+```
+
+```{r, fig.width=9, fig.height=8}
+pdf("supp_DTFA.pdf", width=9, height=8)
+plot_grid( p2, p3, nrow=2, scale=0.95, labels="AUTO") 
+dev.off()
+```

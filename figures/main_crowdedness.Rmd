@@ -1,0 +1,240 @@
+---
+title: "motifs_and_crowdedness"
+author: "Pierre-Luc Germain"
+date: "2025-11-07"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r}
+suppressPackageStartupMessages({
+  library(ggplot2)
+  library(Matrix)
+  library(ComplexHeatmap)
+  library(sechm)
+  library(patchwork)
+  library(cowplot)
+  library(GGally)
+  library(colorBlindness)
+  library(RColorBrewer)
+})
+source("../utils/load_all.R", chdir=TRUE)
+```
+
+# Crowdedness
+
+```{r, fig.width=10, fig.height=2}
+context.crwd <- readRDS("../09_crowdedness/crowdedness_per_context.rds")
+med <- floor(attr(context.crwd, "nTFs")/2)
+med <- data.frame(Var2=names(med), value=med)
+nTfs <- reshape2:::melt(context.crwd)
+nTfs <- nTfs[which(nTfs$value>0),-1]
+b <- round(seq(from=1, to=sqrt(300), length.out=4)^2)
+p_cwd <- ggplot(nTfs, aes(value)) + geom_histogram(bins=27, fill=tfContextColors[1]) + scale_x_sqrt(breaks=b) + 
+  facet_wrap(~Var2, scale="free_x", nrow=1) + theme_sleek() + scale_y_sqrt(breaks=c(0,250000,1000000), labels=c(0,250,1000)) +
+  labs(x="Number of TFs with peaks centers in the same PRE", y="Thousands\nof regions") +
+  geom_vline(data=med, aes(xintercept=value), linetype="dashed") + coord_cartesian(ylim=c(0,1000000))
+p_cwd
+```
+
+# Crowdedness correlation across cell types
+
+```{r}
+crwd2 <- t(t(context.crwd)/attr(context.crwd, "nTFs"))
+gr <- as(row.names(context.crwd), "GRanges")
+crwd3 <- 200*crwd2/pmax(100L, width(gr))
+
+hex_fun <- function(data, mapping, ...){
+  ggplot(data = data, mapping = mapping) +
+    geom_hex(..., bins=30) + theme_sleek() + theme(legend.position = "right") +
+    theme(panel.grid.major=element_blank(), panel.grid.minor=element_blank(), panel.border = element_blank()) +
+    scale_fill_gradient(low="lightgrey", high="darkblue", trans="log",
+                        breaks=c(1,100,10e3,10e5), labels=c("1","100","10^3","10^6")) +
+    scale_x_continuous(breaks=c(0,30,60)) + scale_y_continuous(breaks=c(0,30,60))
+}
+
+# Pairwise plot matrix
+p_cwd_pairwise <- GGally::ggpairs(as.data.frame(100*crwd3[which(rowSums(crwd3)>0),]), lower = list(continuous = hex_fun), diag="blank", legend=11, progress=FALSE) +   labs(x="Crowdedness (% of assayed TFs)", fill="# of\nregions") + theme(panel.border = element_blank())
+p_cwd_pairwise <- ggmatrix_gtable(p_cwd_pairwise)
+```
+
+
+# Upset of highly-crowded across across celltypes
+
+```{r}
+crwd <- lapply(as.data.frame(crwd3>0.4), which)
+crwd <- crwd[order(-lengths(crwd))]
+
+cm <- make_comb_mat(crwd)
+cm2 <- cm[which(comb_size(cm)>10)]
+upset <- ComplexHeatmap::UpSet(cm2, pt_size=unit(2, "mm"), lwd=1.5, row_names_gp=gpar(fontsize=10),
+                               top_annotation = upset_top_annotation(cm2, height=unit("1", "cm"), annotation_name_gp=gpar(fontsize=10)),
+                               right_annotation = upset_right_annotation(cm2,  annotation_name_gp=gpar(fontsize=10))
+                               )
+```
+
+
+# Relationship between crowdedness and accessibility
+
+```{r}
+dat1 <- readRDS("../09_crowdedness/crowdedness_vs_ATAC.rds")
+dat1$context <- factor(dat1$context, names(colnames(context.crwd)), colnames(context.crwd))
+dat1$crwd2 <- 200*100*(dat1$crwd/attr(context.crwd, "nTFs")[as.integer(dat1$context)])/pmax(100, dat1$width)
+dat1$ATAC2 <- 200*dat1$ATAC/pmax(200,dat1$width)
+p_cwd_atac <- ggplot(dat1, aes(ATAC2, crwd2)) + geom_hex(bins=40) +  theme_sleek() +
+  scale_fill_gradient(low="lightgrey", high="darkblue", trans="log", breaks=c(1,200,40000)) + 
+  labs(x="Accessibility (ATAC read density/200bp)", y="Crowdedness (% of TFs)", fill="# of regions") + scale_y_sqrt(breaks=c(1,20,60)) + scale_x_log10(breaks=c(5,150,5000)) + facet_wrap(~context) + coord_cartesian(ylim=c(1,115)) +
+  theme(legend.position="inside", legend.position.inside = c(0.85, 0.2), legend.key.height = unit(0.3,"cm"))
+p_cwd_atac
+```
+
+# Promoters/SEs
+
+```{r}
+dp2 <- readRDS("../09_crowdedness/crowded_in_promsSEs.rds")
+dpn <- attr(dp2, "n")
+dp2$variable[which(dp2$variable=="both")] <- "promoters"
+p.pp <- ggplot(dp2, aes(celltype, 100*value)) + 
+    geom_col(aes(fill=reorder(variable, value))) + theme_sleek() +
+    labs(y="% of highly-\ncrowded regions", x=NULL, fill=NULL) +
+    scale_fill_manual(values=cbbPalette[5:6])+
+    theme(axis.text.x=element_text(angle=90, vjust=0.5, hjust=1), legend.position = "top") +
+    geom_text(data=dpn, aes(y=0, label=paste0("n=",n)), hjust=0, nudge_y = 3, angle = 90, size=3.5, color="grey20")
+
+```
+
+
+
+# Motif scores in different sets
+
+Mean motif matching score (as a proportion of the TF's maximum matching score) in crowded vs non-crowded peaks:
+
+```{r}
+m <- readRDS("../09_crowdedness/motifScores_in_crowded_vs_bound_V3.rds")
+m$set <- factor(m$set, levels(m$set)[c(2,3,1,5,4)], c("non-crowded\nbound sites", "all bound\nsites", "crowded\nbound sites", "matched\nnon-bound", "all non-bound"))
+p1 <- ggplot(m, aes(set, pmax(-1,mean/TF.maxMotifScore))) + stat_summary() +
+  theme_sleek() + labs(x=NULL, y="Mean motif matching\n(proportion of max\nmotif matching score)")
+p1 <- p1 + coord_flip()
+```
+
+Comparison across the 4 sets on a per-TF basis:
+
+```{r, fig.width=10, fig.height=4}
+m$mean <- pmax(m$mean,-max(m$mean, na.rm=TRUE))
+m2 <- reshape2::dcast(m, TF~set, value.var="median", fun.aggregate = mean)
+m$crowdedness <- m$bound.crowdedness/as.numeric(attr(context.crwd, "nTFs")[as.character(m$context)])
+
+w <- which(m$set=="crowded\nbound sites")
+nCrowdedPeaks <- setNames(m$n[w], m$TF[w])
+m$nCrowdedPeaks <- nCrowdedPeaks[m$TF]
+
+ag <- aggregate(m[,c("TF.maxMotifScore", "bound.atac", "crowdedness", "n", "nCrowdedPeaks")], by=m[,"TF",drop=FALSE], FUN=median)
+row.names(ag) <- ag[,1]
+row.names(m2) <- m2[,1]
+m2 <- as.matrix(m2[,-1])
+m2b <- m2/ag[row.names(m2),"TF.maxMotifScore"]
+d <- as.data.frame(m2b)
+d$crowdedness <- ag[row.names(d),"crowdedness"]
+d$n <- ag[row.names(d),"n"]
+
+
+se <- SummarizedExperiment(list(score=t(m2), prop=t(m2b)),
+                           colData=ag[row.names(m2),])
+assay(se, "prop", withDimnames = FALSE) <- matrix(pmax(-0.5,assay(se, "prop")), nrow=nrow(se))
+se <- se[,colSums(is.na(assay(se,"prop")) | is.infinite(assay(se,"prop")))==0]
+
+
+se$propMax <- assay(se,"prop")[grep("all bound", row.names(se)),]
+se$meanBoundScore <- assay(se,"score")[grep("all bound", row.names(se)),]
+se$meanUnboundScore <- assay(se,"score")[grep("all non-bound", row.names(se)),]
+w <- which(se$propMax>0.25 & se$meanBoundScore>2 & (se$meanBoundScore-se$meanUnboundScore)>1)
+tmp <- assay(se, "scaled") <- t(t(assay(se,"score"))/colMaxs(assay(se,"score")))
+
+dd <- dist(t(tmp[,w]))
+hc <- seriation:::reorder.hclust(hclust(dd), dd)
+h <- sechm(se[,w], row.names(se), assayName="scaled", hmcols = viridis::viridis(101), name="Relative\nscore", sortRowsOn = NULL, cluster_rows = FALSE, row_names_gp=gpar(fontsize=10, lineheight=0.7),
+        cluster_cols = hc) %v% #, top_annotation="crowdedness") %v% 
+  sechm(se[,w], row.names(se), assayName="score", cluster_cols = hc,
+        hmcols = viridis::cividis(101),
+        name="Mean\nmotif\nmatching\nscore", sortRowsOn = NULL, cluster_rows = FALSE, breaks=0.9995, column_title="TFs", row_names_gp=gpar(fontsize=10, lineheight=0.8))
+
+h  
+```
+
+```{r}
+d2 <- d[colnames(se)[w],]
+p2 <- ggplot(d2, aes(`crowded\nbound sites`, `non-crowded\nbound sites`, color=100*crowdedness)) + 
+  geom_abline(slope=1) + geom_point() + theme_sleek() + scale_color_viridis_c() + 
+  labs(x="Motif matching of crowded peaks\n(mean proportion of max motif matching score)",
+       y="Motif matching of non-crowded peaks\n(mean proportion of max motif matching score)",
+       color="Crowdedness\n(% of\nprofiled TFs)")
+
+#ggplot(as.data.frame(colData(se[,w])), aes(bound.atac, bound.crowdedness)) + geom_point()
+```
+
+
+```{r, eval=FALSE}
+anno <- readRDS("../06_meta/TF_annotation.rds")
+d3 <- merge(d2, anno, by="row.names")
+d3$diff <- d3$`non-crowded\nbound sites`-d3$`crowded\nbound sites`
+d3$nNonDBD <- lengths(strsplit(d3[["Non_DNA_binding Domains"]], ";", fixed=TRUE))
+d3$crowdedness <- 100*d3$crowdedness
+d3$diff <- -d3$diff
+m3 <- reshape2:::melt.data.frame(d3, c("TF","customClass","crowdedness"), measure.vars = c("crowdedness", "diff","motifIC"))
+levels(m3$variable) <- c("Crowdedness\nscore (%)", "Motif matching\ndiff in crowded", "Motif IC")
+p4 <- ggplot(m3, aes(value, reorder(customClass, crowdedness))) + stat_summary() + 
+  facet_wrap(~variable, nrow=1, scale="free_x") + theme_sleek() + 
+  scale_x_continuous(breaks=scales::pretty_breaks(3)) + labs(x=NULL, y=NULL)
+```
+
+
+# GR example - crowded peaks are no less causally relevant
+
+```{r}
+d3 <- readRDS("../09_crowdedness/crowdedness_GR_rna.rds")
+ag <- aggregate(d3[,c("log2FC","scaledLFC")], by=d3[,c("sample","timePoint","crowdset","type")], FUN=\(x) mean(x))
+levels(ag$crowdset) <- c(paste0("GR peak\n", levels(ag$crowdset)[1:3]), "matched\nno GR")
+
+base_pal <- brewer.pal(9, "Blues")
+pal20All <- colorRampPalette(base_pal)(20)
+pal20 <- pal20All[(length(pal20All)-length(levels(ag$timePoint))):(length(pal20All)-1)]
+
+p2 <- ggplot(ag, aes(crowdset, log2FC, fill=timePoint)) + geom_boxplot(outliers = FALSE) + 
+  theme_sleek() + labs(y="log2FC", x="Promoters",
+                       fill="Time after\nactivation",
+                       ) + facet_wrap(~type, nrow=2, scale="free_y") +
+    scale_color_manual(values=pal20)+
+    scale_fill_manual(values=pal20)+
+    guides(fill = guide_legend(ncol = 2), color = guide_legend(ncol = 2))
+```
+
+```{r}
+d <- readRDS("../09_crowdedness/crowdedness_GR.rds")
+d$signal <- factor(d$signal, c("NR3C1", "ATACseq", "DNaseseq"), c("NR3C1\nChIP-seq", "ATAC-seq", "DNase-seq"))
+d <- d[grep("NR3C1",d$signal),]
+levels(d$crowdset)[1] <- "not\ncrowded"
+d$crowdset <- droplevels(d$crowdset)
+p5 <- ggplot(d, aes(crowdset, log2FC, fill=time)) + geom_boxplot(outliers = FALSE) + 
+  labs(x=NULL, y="GR (NR3C1) ChIP\nlog2(fold-change)", fill="Time after activation", color="Time after activation") + 
+  theme_sleek() + theme(legend.position = "top", axis.text.x=element_text(angle=90, vjust=0.5, hjust=1)) + 
+  scale_fill_manual(values=c(pal20[1], pal20[8], pal20All[length(pal20All)]))+
+  guides(fill = guide_legend(title.position = "top", title.hjust = 0.5),
+         color = guide_legend(title.position = "top", title.hjust = 0.5))
+```
+
+```{r, fig.width=10, fig.height=14}
+pdf("main_crowdedness.pdf", width=10, height=14)
+plot_grid(plot_grid(p_cwd, scale=0.95, labels="AUTO"),
+  plot_grid(p_cwd_pairwise,
+            plot_grid(grid.grabExpr(draw(upset)), p_cwd_atac, nrow=2, scale=c(0.9,0.95), rel_heights = c(2,3), labels=c("C","D")),
+            nrow=1, rel_widths = c(5,4), scale=c(0.95, 1), labels=c("B", NA)),
+  plot_grid(
+    plot_grid(p.pp, p1, p5, nrow=3, scale=0.95, labels=c("E","F","H")),
+    plot_grid(grid.grabExpr(draw(h)), p2, nrow=2, scale=0.95, labels=c("G","I")),
+    nrow=1, rel_widths=c(1,3)
+  ),
+  nrow=3, rel_heights = c(1.5,5,7))
+dev.off()
+```
+

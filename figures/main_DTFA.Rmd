@@ -1,0 +1,117 @@
+---
+title: "main_DTFA"
+output: html_document
+---
+
+```{r}
+suppressPackageStartupMessages({
+  library(ComplexHeatmap)
+  library(ggplot2)
+  library(cowplot)
+  library(patchwork)
+  library(sechm)
+})
+source("../utils/load_all.R", chdir = TRUE)
+```
+
+# From ATAC
+
+```{r}
+res2 <- readRDS("../07_DTFA/DTFAB_results.rds")
+
+colors <- setNames(c("#0072B2", "#56B4E9", "#E69F00","#D55E00"), levels(res2$method))
+
+pATAC <- ggplot(res2, aes(TF, dev.rank, fill=method)) + geom_col(position=position_dodge()) + scale_y_sqrt(breaks=c(1,10,50,200,600)) + theme_sleek() + 
+  ylab("Rank of true TF (lower=better)") + scale_fill_manual(values=colors) + labs(tag="A") +
+ggplot(res2, aes(TF, t, fill=method)) + geom_col(position=position_dodge()) + theme_sleek() + ylab("t-value (higher=better)") + scale_y_continuous(transform = signedSqrt) + scale_fill_manual(values=colors) + labs(tags="B") +
+ggplot(res2, aes(TF, relAUC, fill=method)) + geom_col(position=position_dodge()) +  theme_sleek() + ylab("Network score (higher=better)") +
+  scale_fill_manual(values=colors) + labs(tag="C") + plot_layout(guides="collect") & 
+  theme(legend.position = "bottom", axis.title.x = element_blank(),
+        axis.text.x=element_text(angle=90, hjust=1, vjust=0.5))
+```
+
+# From RNA
+
+```{r}
+res <- readRDS("../07_DTFA/fromRNA/Nakatake2020/results.rds")
+TFlists <- readRDS("../07_DTFA/fromRNA/Nakatake2020/TFlists.rds")
+```
+
+Overlap between sets:
+
+```{r}
+p1 <- UpSet(make_comb_mat(TFlists), row_names_gp=gpar(fontsize=11))
+```
+
+Results:
+
+```{r}
+tt <- as.data.frame(t(sapply(res, \(x) colSums(x$summary[,1:4]))))
+tt <- tt[order(-tt$inTop10/tt$isAnnotated),]
+tt <- tt[grep("logCPM", row.names(tt)),]
+row.names(tt) <- gsub("res_logCPM_","",row.names(tt))
+sel <- c("predsReweigh.raw", "proxReweigh.raw", "preds.raw", "collecTRI", "motifs.raw")
+tt2 <- tt[sel,]
+tt2$method <- newNames <- c("Predictions\n(re-weighed)+Links", "Predictions (re-weighed)\n(Promoters only)", "Predictions\n(raw)+Links","collecTRI", "Motifs+Links")
+tt2$method2 <- gsub("\n(Promoters only)","",tt2$method, fixed=TRUE)
+tt2$method2 <- gsub(" ","\n",gsub("+Links","",tt2$method2, fixed=TRUE),fixed=TRUE)
+tt2$propTop10 <- tt2$inTop10/tt2$isAnnotated
+tt2$promoter <- grepl("Promoters", tt2$method)
+
+colors2 <- c(Motifs = "#0072B2", "Predictions\n(re-weighed)" = "#E69F00", "Predictions\n(raw)" = "#D55E00",
+             collecTRI = "#CC79A7")
+
+p2 <- ggplot(tt2, aes(reorder(method, -inTop10), inTop10, fill=method2, color=promoter)) + geom_col() + theme_sleek() + 
+  labs(y="Number of perturbations\ndetected (in top 10)", x=NULL) +
+  ggplot(tt2, aes(reorder(method, -propTop10), propTop10, fill=method2, color=promoter)) + geom_col() + theme_sleek() + 
+  labs(y="Proportion of annotated\nTFs detected (in top 10)", x=NULL) + plot_layout(guides="collect") &
+  scale_color_manual(values=c("FALSE"="#FFFFFF00", "TRUE"="black"), guide="none") &
+  scale_fill_manual(values=colors2) & theme(axis.text.x=element_text(angle=90, hjust=1, vjust=0.5)) &
+  labs(fill="Method")
+```
+
+```{r}
+identified <- lapply(res, \(x) names(which(rowSums(x$summary[,1:2])>0)))
+identified <- identified[grep("logCPM", names(identified))]
+names(identified) <- gsub("res_logCPM_","",names(identified))
+identified <- identified[sel]
+names(identified) <- newNames
+notInCollecTRI <- unique(setdiff(unlist(identified), identified$collecTRI))
+
+identified <- identified[!grepl("Promoters",names(identified))]
+names(identified) <- gsub("\n(raw)"," (raw)",gsub("+Links", "", names(identified), fixed=TRUE), fixed=TRUE)
+
+
+p3 <- UpSet(make_comb_mat(identified), row_names_gp=gpar(fontsize=11))
+```
+
+```{r}
+se <- readRDS("../07_DTFA/fromRNA/Nakatake2020/res_logCPM_predsReweigh.raw.fastMLM.SE.rds")
+se2 <- readRDS("../07_DTFA/fromRNA/Nakatake2020/res_logCPM_collecTRI.fastMLM.SE.rds")
+se <- log2FC(se, fromAssay = "a", controls=se$condition=="Control")
+se2 <- log2FC(se2, fromAssay = "a", controls=se$condition=="Control")
+d <- meltSE(se, intersect(notInCollecTRI, TFlists$collecTRI))
+d <- d[which(d$feature == d$perturbation),]
+anno <- readRDS("../06_meta/TF_annotation.rds")
+d$effector <- factor(anno[d$feature,"effector"])
+p4 <- ggplot(d, aes(reorder(feature, as.integer(effector)), log2FC, fill=effector, color=effector)) + 
+  geom_boxplot() + theme_sleek() + theme(axis.text.x=element_text(angle=90, hjust=1, vjust=0.5)) +
+  geom_hline(yintercept=0, linetype="dashed") + 
+  labs(fill="Effector\ndomain(s)", color="Effector\ndomain(s)", subtitle="Perturbations not detected by collecTRI")
+```
+
+```{r, fig.width=10, fig.height=9}
+pdf("main_DTFA.pdf", width=10, height=9)
+plot_grid( plot_grid(pATAC + plot_annotation(title = "Differential TF activity inference from ATAC-seq data")),
+           plot_grid(
+             plot_grid(grid.grabExpr(draw(p1)), grid.grabExpr(draw(p3)),
+                       nrow=2, labels=c("D","F"), rel_heights = c(5,6)),
+             p2 + plot_annotation(title = "  Differential TF activity inference from RNA-seq data") &
+               theme(legend.position="bottom"),
+             rel_widths=c(2,3), labels=c(NA, "E"), scale=c(0.95, 1)),
+           nrow=2, rel_heights = c(2,3)
+           )
+dev.off()
+```
+
+

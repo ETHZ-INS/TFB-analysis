@@ -1,0 +1,113 @@
+---
+title: "featureImportances"
+output: html_document
+---
+
+```{r}
+suppressPackageStartupMessages({
+  library(ggplot2)
+  library(ggsignif)
+  library(cowplot)
+  library(patchwork)
+  library(SummarizedExperiment)
+})
+source("../utils/load_all.R", chdir=TRUE)
+```
+
+
+```{r}
+meta <- readRDS("../06_meta/shap_by_meta.SE.rds")
+meta <- cbind(as.data.frame(colData(meta)), t(assay(meta)))
+meta <- meta[!is.na(meta$ATAC),]
+cofactors <- readRDS("../06_meta/shap_cofactors.rds")
+```
+
+Hyper-parameters
+
+```{r}
+hp <- readRDS("../06_meta/hyperparams.rds")
+hp <- hp[which(hp$model=="full_model"),]
+ag <- aggregate(hp[,grep("learning|lambda|num_|min_gain|_fraction|sum_|complexity", colnames(hp))], by=hp[,"TF",drop=FALSE], FUN=mean)
+meta <- merge(meta, ag, by="TF")
+meta$Complexity <- meta$tree_complexity
+meta$logComplexity <- log1p(meta$Complexity)
+meta$Regularization <- meta$lambda_l1+meta$lambda_l2
+meta$nPositives <- 3.8e6*meta$nContexts*meta$pos_frac
+mod <- lm(logComplexity~nPositives, data=meta)
+meta$adjComplexity <- meta$logComplexity-predict(mod, meta)
+```
+
+
+```{r}
+meta$BindingMode <- factor(meta$Binding.mode)
+levels(meta$BindingMode) <- c("Monomer or\nhomomultimer", "Obligate\nheteromer", NA)
+p_heteromer_cofactors <- ggplot(meta[!is.na(meta$Binding.mode),], aes(BindingMode, Cofactors)) + xlab("Binding mode") +
+  geom_violin(fill="#00bfc4") + stat_summary(fun.data = mean_se) + theme_sleek() + coord_cartesian(ylim=c(0,70)) + 
+  ylab("Importance of cofactors\n(% Shapley)") + geom_signif(comparisons = list(levels(meta$BindingMode)), textsize = 3)
+
+meta$hasIDR <- factor(meta$pc.disorder>0, c(F,T), c("without","with"))
+p_IDR_cofactors <- ggplot(meta[!is.na(meta$pc.disorder),], aes(hasIDR, Cofactors)) + xlab("Intrinsically-disordered\ndomain") +
+    geom_violin(fill="#00bfc4") + stat_summary(fun.data = mean_se) + theme_sleek() + coord_cartesian(ylim=c(0,70)) + 
+    geom_signif(comparisons = list(levels(meta$hasIDR)), textsize = 3)
+
+meta$effector <- factor(meta$effector)
+p_effector_cofactors <- ggplot(meta[!is.na(meta$effector),], aes(effector, Cofactors)) + 
+  geom_violin(fill="#00bfc4") + stat_summary(fun.data = mean_se) + theme_sleek() + xlab("Effector domain(s)") +
+  ylab("Importance of cofactors\n(% Shapley)") + coord_cartesian(ylim=c(0,70)) + 
+  geom_signif(comparisons = list(levels(meta$effector)[c(1,3)]), textsize = 3)
+
+meta$isPioneer <- factor(meta$ChromatinOpeningType=="pioneer", c(TRUE, FALSE), c("pioneer", "others"))
+p_pioneer_cofactors <- ggplot(meta[!is.na(meta$isPioneer),], aes(isPioneer, Cofactors)) + xlab("Chromatin opening") +
+    geom_violin(fill="#00bfc4") + stat_summary(fun.data = mean_se) + theme_sleek() +  coord_cartesian(ylim=c(0,70)) +
+    ylab("Importance of cofactors\n(% Shapley)") + geom_signif(comparisons = list(levels(meta$isPioneer)), textsize = 3)
+```
+
+
+```{r, fig.width=12, fig.height=6}
+meta$Complexity <- meta$adjComplexity
+meta$motifIC <- pmin(meta$motifIC, 32)
+meta[["% disorder"]] <- meta$pc.disorder
+
+semPlot2 <- function(meta, by="customClass", tag=NULL){
+  (doSEMplot(meta, order.by = "Cofactors", group.by=by, vars = c("Cofactors", "ATAC", "Sequence", "TFmotif")) + labs(tag=tag, subtitle="Sets of predictive features")) +
+  (doSEMplot(meta, order.by = "Cofactors", group.by=by, vars = c("Complexity")) + labs(x="Value", subtitle="Model") + theme(axis.text.y=element_blank(), axis.ticks.y=element_blank())) +
+doSEMplot(meta, order.by = "Cofactors", group.by=by, vars = c("motifIC", "nVICE", "% disorder")) + labs(x="Value", subtitle="TF characteristics") + scale_x_continuous(n.breaks=3) +
+  theme(axis.text.y=element_blank(), axis.ticks.y=element_blank()) + plot_layout(guides="collect", widths=c(4,1,3))
+}
+
+
+p_fiClass <- semPlot2(meta, tag="E") & theme(axis.text.x=element_text(size=9, angle=90, hjust=1, vjust=0.5))
+p_fiClass
+```
+
+```{r, fig.width=12, fig.height=2}
+p_fiChr <- semPlot2(meta, by="ChromatinOpeningType", tag="F") & theme(axis.text.x=element_text(size=9, angle=90, hjust=1, vjust=0.5))
+p_fiChr
+```
+
+
+```{r}
+co2 <- cofactors[which(cofactors$TF %in% c("MYC", "NFKB1", "FOS") & cofactors$TF!=cofactors$cofactor & cofactors$cofactor!="HDAC1"),]
+co2$TF <- factor(co2$TF, c("MYC", "NFKB1", "FOS"))
+p_cof1 <- ggplot(co2, aes(rank(-meanPosShap),meanPosShap,label=cofactor)) + geom_point() + 
+  ggrepel::geom_text_repel(data=co2[co2$meanPosShap>0.015,], hjust=0, nudge_x = 0.5, min.segment.length = 0, size=3) + 
+  facet_wrap(~TF, scale="free") + scale_x_sqrt() + theme_sleek() + labs(x="Cofactor rank", y="Shapley value of positives")
+```
+
+
+We'd expect HTH and forkhead factors to have the highest sequence-dependence.
+
+
+```{r, fig.width=10, fig.height=11}
+p_cof <- (p_heteromer_cofactors + labs(tag="A")) + (p_pioneer_cofactors + labs(tag="B")) + (p_IDR_cofactors + labs(tag="C")) + (p_effector_cofactors + labs(tag="D")) + plot_layout(nrow=1)
+pdf("featureImportances.pdf", width=10, height=11)
+plot_grid(
+  plot_grid( p_cof, nrow=1),
+  plot_grid( p_fiClass),
+  plot_grid( p_fiChr),
+  plot_grid( p_cof1 + labs(tag="G"), scale=0.95),
+  nrow=4, rel_heights = c(4,5.1,3.3,3.6)
+)
+dev.off()
+```
+

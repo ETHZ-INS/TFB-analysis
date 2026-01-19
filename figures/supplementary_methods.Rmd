@@ -1,0 +1,279 @@
+---
+title: "Supplementary Methods"
+output: html_document
+---
+
+```{r setup}
+suppressPackageStartupMessages({
+  library(ggplot2)
+  library(Matrix)
+  library(ComplexHeatmap)
+  library(sechm)
+  library(patchwork)
+  library(cowplot)
+  library(GGally)
+  library(ggrastr)
+  library(colorBlindness)
+  library(RColorBrewer)
+  library(gam)
+  library(TFBlearner)
+  library(data.table)
+  library(Matrix)
+  library(latex2exp)
+})
+source("../utils/load_all.R", chdir=TRUE)
+source("../02_preprocessing/utils.R")
+
+seed <- 42
+set.seed(seed)
+```
+
+```{r, supplementary table 1 - raw data}
+metaAtacEncode <- fread("../data/meta_data/metaRawEncode.tsv")
+metaAtacEncode <- unique(metaAtacEncode, by=c("context", "ENCODE_file_id"))
+metaAtacEncode <- metaAtacEncode[,.(db_id_ATAC=paste(ENCODE_file_id, collapse=";")), 
+                                 by="context"]
+
+# all-pooled datasets
+metaRawTrain <- readRDS("../data/meta_data/03_trainMetaAll.rds")
+metaRawTrain$set <- "train"
+metaRawTest <- readRDS("../data/meta_data/03_testMetaAll.rds")
+metaRawTest$set <- "test"
+metaRaw <- rbind(metaRawTrain, metaRawTest, use.names=TRUE, fill=TRUE)
+suppTable1 <- metaRaw[,c("set", 
+                         "origin_ATAC", "db_id_ATAC", # ENCODE IDs of ATAC experiments
+                         "origin_chIP", "db_id_chIP",
+                         "context", 
+                         "context_id",
+                         "is_matched",
+                         "tf_name"), 
+                      with=FALSE]
+suppTable1.1 <- subset(suppTable1, origin_ATAC!="ENCODE" | is.na(origin_ATAC))
+suppTable2.1 <- subset(suppTable1, origin_ATAC=="ENCODE")
+suppTable2.1 <- merge(suppTable2.1[,setdiff(colnames(suppTable2.1), 
+                                            "db_id_ATAC"), with=FALSE],
+                      metaAtacEncode, 
+                      by.x=c("context"), 
+                      by.y=c("context"), 
+                      all.x=TRUE, all.y=FALSE)
+suppTable1 <- rbind(suppTable1.1, suppTable2.1)
+suppTable1 <- suppTable1[,.(db_id_ATAC=paste(db_id_ATAC, collapse=";"),
+                            db_id_chIP=paste(db_id_chIP, collapse=";")), 
+                         by=c("set", "origin_ATAC", "origin_chIP", 
+                              "context", "context_id", "is_matched", "tf_name")]
+
+# mismatched 
+suppTable1[,context_id:=fifelse(context_id=="33", "165", 
+                                as.character(context_id))]
+suppTable1[,set:=fifelse(grepl("HEK293", context), "train", set)]
+write.table(suppTable1, 
+            file="Supplementary_table1_rawData.tsv",
+            sep="\t", quote=FALSE, row.names=FALSE)
+```
+
+```{r, supplementary table 2 - aggregated data}
+metaMerged <- readRDS("../data/05_maeAll_meta.rds")
+anno <- readRDS("../06_meta/TF_annotation.rds")
+anno <- as.data.table(anno, keep.rownames=TRUE)
+setnames(anno, "rn", "tf_name")
+
+metaMerged <- metaMerged[,c("full_id", "tf_name", 
+                            "context", "is_matched"), with=FALSE]
+mae <- readRDS("../data/05_maeAll_conFeat_sub.rds")
+smpDt <- as.data.table(sampleMap(mae))
+smpDt <- unique(smpDt, by=c("primary", "isTesting", "isTraining"))
+metaMerged <- merge(metaMerged, 
+                    smpDt[,c("isTesting", "isTraining", "primary"), with=FALSE], 
+                    by.x=c("full_id"),
+                    by.y=c("primary"))
+metaMerged[,set:=fifelse(isTesting, "test", "train")]
+metaMerged[,isTraining:=fifelse(!is_matched, FALSE, isTraining)]
+metaMerged[,set:=fifelse(!isTesting & !isTraining, "not matched, not used as training context but for feature construction", set)]
+setnames(metaMerged, "full_id", "context_id")
+
+# load deprecated ids for reference
+deprecatedIds <- readRDS("../data/deprecatedIDs_v1.0.2.rds")
+deprecatedIds$note <- "IDs of contexts have been re-annotated or removed for prediction round 1.0.2"
+setnames(deprecatedIds, c("tfName", "orig_context", "new_id"), c("tf_name", "context_id", "new_context_id"))
+metaMerged$status <- "in-use"
+suppTable2 <- rbind(metaMerged, deprecatedIds[,c("context_id", "tf_name", "new_context_id",
+                                                 "status")], use.names=TRUE, fill=TRUE)
+suppTable2 <- merge(suppTable2, 
+                    anno[,c("tf_name", "isLambertTf"), with=FALSE], 
+                    by.x=c("tf_name"), 
+                    by.y=c("tf_name"), 
+                    all.x=TRUE, all.y=FALSE)
+write.table(suppTable2, 
+            file="Supplementary_table2_aggregated.tsv",
+            sep="\t", quote=FALSE, row.names=FALSE)
+```
+
+```{r, numbers, eval=TRUE}
+tfCombs <- subset(suppTable2, is_matched & isLambertTf)
+length(unique(tfCombs$tf_name))
+tfCombs[,combs:=paste(context_id, tf_name, sep="_")]
+length(unique(tfCombs$combs))
+```
+
+```{r, supplementary table 4 prediction contexts, eval=TRUE}
+predContexts <- readRDS("../data/prediction_meta.rds")
+predContexts <- predContexts[,c("full_id", "context_name")]
+setnames(predContexts, c("full_id", "context_name"), c("context_id", "context"))
+write.table(predContexts, 
+            file="Supplementary_table4_prediction_contexts.tsv",
+            sep="\t", quote=FALSE, row.names=FALSE)
+```
+
+```{r, GTRD peak-callers reproducibility, eval=TRUE}
+metaTrainPath <- "../data/meta_data/03_trainMetaAll.rds"
+metaChIPPath <- "../data/meta_data/02_fullMetaChIPAll.rds"
+refCoords <- readRDS("../data/hybrid.custom.hg38.resized.resplit.rds")
+metaTrainData <- readRDS(metaTrainPath)
+metaDataChIP <- readRDS(metaChIPPath)
+
+metaDataChIP <- subset(metaDataChIP, 
+                       combination_id %in% metaTrainData$combination_id)
+metaDataChIP[,n_exp:=length(unique(db_id_chIP)), by=combination_id]
+
+metaChIPRep <- subset(metaDataChIP, n_exp>=2)
+repCombs <- unique(metaChIPRep$combination_id)
+
+repStats <- getLabels(repCombs, metaChIPRep, refCoords, subset=TRUE)
+saveRDS(repStats, "repStats.rds")
+
+repStatsAnnot <- getLabels(repCombs, metaChIPRep, refCoords, subset=TRUE, 
+                           annotate=TRUE)
+saveRDS(repStatsAnnot, "repStatsAnnot.rds")
+```
+
+```{r, eval=TRUE}
+#mod <- readRDS("../data/meta_data/gam_rep.rds")
+#repDt <- mod$data
+repDt <- lapply(repStats, function(e) e$repDt)
+repDt <- rbindlist(repDt)
+aggCounts <- as.data.table(table(only_pics=repDt$is_only_PICS, 
+                                 is_rep=repDt$label_rep))
+aggCounts <- dcast(only_pics~is_rep, data=aggCounts, value.var="N")
+setnames(aggCounts, c("FALSE", "TRUE"), c("non_rep", "rep"))
+aggCounts[,n:=rep+non_rep]
+aggCounts[,rate:=rep/n]
+
+aggCounts[,only_pics:=fifelse(as.logical(only_pics), "Only PICS", "Any caller")]
+ggplot(aggCounts, aes(x=only_pics,
+                      y=rate)) +
+  geom_col(fill = "#4E79A7", width = 0.6)+
+  geom_text(aes(label = sprintf("n=%s", scales::comma(n), 100*rate)), #"n=%s\nrate=%.2f%%"
+                vjust = -0.5, size = 3.2) +
+  scale_y_continuous(labels = scales::percent_format(accuracy=1), 
+                     limits = c(0, 0.5)) +
+  labs(x="", y="Replication rate", 
+       subtitle="Replication rate of peaks found by PICS only") + #  (95% CI
+  theme_sleek()
+ggsave("rep_PICS.pdf", units="cm", width=12, height=12, dpi=150)
+```
+
+
+
+```{r, replicability-score}
+# the gam object is relatively large
+mod <- readRDS("../data/meta_data/gam_rep.rds")
+repTrainDt <- mod$data
+repTrainDt$pred_y <- mod$fitted.values
+
+p1 <- ggplot(repTrainDt, aes(x=label_rep, y=qValue))+
+      labs(x="Peak replicated",y="Peak q-value", tag="A")+
+      ggrastr::geom_boxplot_jitter(outlier.jitter.width=0, 
+                                   outlier.jitter.height=0)+
+      scale_y_log10()+
+      theme_sleek()
+p2 <- ggplot(repTrainDt, aes(x=qValue, y=pred_y, color=label_rep))+
+      scale_x_log10()+
+      labs(color="Peak replicated", y="r-score", x="Peak q-value", tag="C")+
+      scale_color_manual(values=cbbPalette[2:3])+
+      ggrastr::geom_point_rast()+
+      theme_sleek()
+
+
+tmp <- tempfile(fileext = ".png")
+ragg::agg_png(tmp, width = 2400, height = 1800, res = 300)
+plot.Gam(mod, se=TRUE, rug=TRUE)
+dev.off()
+
+p3 <- magick::image_read(tmp)
+p3 <- magick::image_ggplot(p3) + 
+    labs(tag="B") +
+    theme_nothing()+
+    theme(plot.tag=element_text(face="bold", size=16), 
+          axis.title.y=element_blank(), 
+          axis.text.y=element_blank())
+p1+p3+p2
+ggsave("supplementary_methods_rscore_opt1.pdf", 
+       width=34, height=12, units="cm", dpi=150)
+
+p1+p3
+ggsave("supplementary_methods_rscore_opt2.pdf", 
+       width=28, height=12, units="cm", dpi=150)
+```
+
+```{r, insertion profile figure}
+prof1 <- list.files("../data/insertions", pattern="CREB1_*", full.names=TRUE)
+prof1 <- prof1[!grepl("_plot",prof1, fixed=TRUE)]
+prof1Dt <- lapply(prof1, readRDS)
+names(prof1Dt) <- gsub(".rds", "", basename(prof1), fixed=TRUE)
+prof1Dt <- rbindlist(prof1Dt, idcol="set", use.names=TRUE, 
+                     fill=TRUE, 
+                     ignore.attr=TRUE)
+prof1Dt[,ins_model:=fifelse(set=="CREB1_median", "median", "per-training context")]
+prof1Dt[,ins_model:=factor(ins_model, levels=c("per-training context", 
+                                   "median"), 
+                     ordered=TRUE)]
+p.ins.creb1 <- ggplot(prof1Dt, aes(x=rel_pos, y=w, 
+                                   group=set,
+                                   color=ins_model, 
+                                   linewidth=ins_model))+
+               geom_line()+
+               scale_color_manual(values=c("per-training context"="lightgray",
+                                           "median"="darkgrey"))+
+               scale_linewidth_manual(values=c("per-training context"=0.3,
+                                               "median"=0.5))+
+               guides(linewidth="none")+
+               ylim(c(0,0.005))+
+               labs(tags="A", 
+                    y=TeX("\\textbf{$w_p$}"), 
+                    x="Positions relative to the center of the motif match", 
+                    color="Insertion profile",
+                    subtitle="Insertion weight profile: CREB1")+
+               theme_sleek()
+
+prof2 <- list.files("../data/insertions", pattern="FOXA1_*", full.names=TRUE)
+prof2 <- prof2[!grepl("_plot",prof2, fixed=TRUE)]
+prof2Dt <- lapply(prof2, readRDS)
+names(prof2Dt) <- gsub(".rds", "", basename(prof2), fixed=TRUE)
+prof2Dt <- rbindlist(prof2Dt, idcol="set", use.names=TRUE, 
+                     fill=TRUE, 
+                     ignore.attr=TRUE)
+prof2Dt[,ins_model:=fifelse(set=="FOXA1_median", "median", "per-training context")]
+prof2Dt[,ins_model:=factor(ins_model, levels=c("per-training context", 
+                                               "median"), 
+                     ordered=TRUE)]
+p.ins.atf2 <- ggplot(prof2Dt, aes(x=rel_pos, y=w, 
+                                  color=ins_model, 
+                                  group=set,
+                                  linewidth=ins_model))+
+               geom_line()+
+               scale_color_manual(values=c("per-training context"="lightgray",
+                                           "median"="darkgrey"))+
+               scale_linewidth_manual(values=c("per-training context"=0.3,
+                                              "median"=0.5))+
+               guides(linewidth="none")+
+               labs(tags="B", 
+                    y=TeX("\\textbf{$w_p$}"), 
+                    x="Positions relative to the center of the motif match", 
+                    subtitle="Insertion weight profile: FOXA1",
+                    color="Insertion profile")+
+               ylim(c(0,0.005))+
+               theme_sleek()
+p.ins.creb1+p.ins.atf2+plot_layout(guides='collect')
+ggsave("supplementary_methods_ins_weights.pdf", width=28, height=12, units="cm",
+       dpi=150)
+```

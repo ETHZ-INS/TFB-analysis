@@ -1,0 +1,151 @@
+---
+title: "supp_crowdedness"
+output: html_document
+---
+
+```{r}
+suppressPackageStartupMessages({
+  library(ComplexHeatmap)
+  library(ggplot2)
+  library(cowplot)
+  library(patchwork)
+  library(sechm)
+})
+source("../utils/load_all.R", chdir = TRUE)
+```
+
+## A
+
+```{r}
+go <- readRDS("../09_crowdedness/GOenrichments_of_crowdedPromoters.rds")
+tt <- table(unlist(lapply(go, \(x) head(x$GO.ID,10))))
+commonTop_gsets <- names(tt)[tt>=3]
+
+unionTop_gsets <- unique(unlist(lapply(go, \(x){
+  head(x$GO.ID[x$q <0.05 & x$Significant>5],5) #[which(x$Fisher<0.01)],3)
+})))
+
+res_top <- dplyr::bind_rows(lapply(go, \(x) x[which(x$GO.ID %in% unionTop_gsets),]), .id="celltype")
+nbSig <- table(res_top$Term[res_top$q<=0.05])
+nbSig <- setNames(as.integer(nbSig), breakStrings(names(nbSig)))
+
+res_top$log2Enrichment <- log2(res_top$Significant/res_top$Expected)
+
+p.enr <- ggplot(res_top, aes(log2(Significant/Expected), breakStrings(Term),
+                    size=Significant, color=q<0.05, fill=-log10(q))) + 
+  geom_vline(xintercept = 0, linetype="dashed") + geom_point(pch=21) + 
+  facet_wrap(~celltype, nrow=1, scale="free_x") + theme_sleek() + coord_cartesian(xlim = c(0,4.2)) +
+  scale_color_manual(values=c("FALSE"="#FFFFFF00", "TRUE"="red"), guide="none") + 
+  scale_size_continuous(name="# genes", breaks=c(10,25,40), range=c(4,10)) +
+  scale_fill_viridis_c() + 
+  labs(x="log2(Enrichment), i.e. log2(crowded/expected)", size="# genes",
+       y="Union of top 5 significant genesets per celltype")
+
+```
+
+## B
+
+```{r}
+anno <- readRDS("../06_meta/TF_annotation.rds")
+se <- readRDS("../09_crowdedness/TFs_cor_with_crowdedness.rds")
+rowData(se)$pc.disorder <- anno[row.names(se), "pc.disorder"]
+rowData(se)$tot.dis.residues <- anno[row.names(se), "tot.dis.residues"]
+se <- se[rowSums(is.na(assay(se)))<=2,]
+
+se2 <- SummarizedExperiment(list(cor=t(assay(se)), prop=t(assay(se, "prop"))), colData=rowData(se))
+
+sel <- c(25,25)
+crowdedTFs <- c(head(row.names(se),sel[1]), tail(row.names(se),sel[2]))
+
+se3 <- se2[,crowdedTFs]
+colData(se3)$type <- factor(rep(c("Least correlated with crowdedness", "Most correlated with crowdedness"), sel))
+p.tfs <- sechm(se3, row.names(se2), gaps_at="type", sortRowsOn = NULL, cluster_rows = FALSE, breaks=1, 
+      show_colnames = TRUE, show_rownames = TRUE, row_title="Pearson\ncor with\ncrowdedness",
+      column_title_gp=gpar(fontsize=11, fontface="bold"), row_title_gp=gpar(fontsize=10),
+      column_names_gp=gpar(fontsize=10), row_names_gp=gpar(fontsize=11)) %v%
+  sechm(se3, row.names(se2), gaps_at="type", assayName = "prop", sortRowsOn = NULL, cluster_rows = FALSE, column_title_gp=gpar(fontsize=11, fontface="bold"),
+                row_title_gp=gpar(fontsize=10), column_names_gp=gpar(fontsize=10), row_names_gp=gpar(fontsize=11),
+      show_colnames = TRUE, show_rownames = TRUE, hmcols=viridis::viridis(101),  row_title="Proportion of\n highly-crowded\nregions bound")
+p.tfs
+```
+
+## C
+
+```{r, fig.width=10, fig.height=5}
+res <- readRDS("../09_crowdedness/reprodScores_by_crwdBin.rds")
+# ggplot(res, aes(bin, reorder(TF, median), fill=median)) + geom_tile() + 
+#   scale_fill_viridis_c() + theme(axis.text.y=element_blank(), axis.ticks = element_blank()) + 
+#   labs(x="Crowdedness & accessibility-matched control bins", y="TFs", fill="Mean\nreproducibility")
+  
+levels(res$bin) <- paste0(rep(c("","ctrl "), each=4), rep(c("<5%","5-20%","20-40%",">=40%"), 2))
+ll <- lapply(split(res, res$celltype), \(x){
+  d <- reshape2::dcast(x, TF~bin, value.var = "median")
+  row.names(d) <- d[,1]
+  d <- as.matrix(d[,-1])
+  d[order(rowMeans(d[,1:4],na.rm=TRUE)),]
+})
+
+colScale <- circlize::colorRamp2(breaks=seq(from=0,to=1,length.out=101),colors=viridis::viridis(101))
+titles <- c("Crowdedness\nbins", "Accessibility-\nmatched\ncontrols")
+titles <- rep(factor(titles, titles), each=4)
+
+hl <- lapply(names(ll), \(n){
+  isLast <- n==rev(names(ll))[1]
+  colAnn <- HeatmapAnnotation("Bin type"=titles, show_legend=isLast, show_annotation_name=FALSE,
+                            col=list("Bin type"=setNames(cbbPalette[c(2,6)], levels(titles))))
+  row_title <- NULL
+  if(n==names(ll)[1]) row_title <- "TFs"
+  grid.grabExpr(
+    draw(Heatmap(ll[[n]], cluster_rows=FALSE, cluster_columns=FALSE, col=colScale, show_row_names=FALSE,
+                column_split=titles, row_title=row_title, show_heatmap_legend=isLast, name="Replicability\nScore",
+                column_title=n, top_annotation = colAnn, column_title_gp=gpar(fontsize=11),
+                row_title_gp=gpar(fontsize=11, fontface="bold"), column_names_gp=gpar(fontsize=10)),
+         show_annotation_legend=isLast, merge=TRUE),
+    wrap.grobs=TRUE)
+})
+
+p.rhm <- plot_grid(plotlist=hl, nrow=1, rel_widths=c(1.15,1,1,1,1.7))
+p.rhm
+```
+
+## D
+
+```{r}
+d <- readRDS("../09_crowdedness/reproducibility_by_cutnrun.rds")
+d <- d[which(d$crwd.bin!="0"),]
+d$bin.type <- ifelse(grepl("ctrl", d$crwd.bin), "Accessibility\n-matched\ncontrol", "Crowdedness\nbin")
+d$bin.type <- factor(d$bin.type, unique(d$bin.type))
+d$crwd.bin <- gsub("20-50%","(20%,40%]",gsub("ctrl ","",d$crwd.bin), fixed=TRUE)
+d$crwd.bin <- factor(d$crwd.bin, unique(d$crwd.bin), levels(res$bin)[1:4])
+p.cnr <- ggplot(d, aes(crwd.bin, value, fill=bin.type)) + geom_col(position = position_dodge()) + 
+  facet_wrap(~variable) + theme_sleek() + ylim(c(0,NA)) +
+  scale_fill_manual(values=cbbPalette[c(3,7)]) + 
+  theme(axis.text.x=element_text(angle=90, hjust=1, vjust=0.5)) +
+  labs(y="Proportion of ChIP peaks\nreproduced by Cut&Run", fill="Bin type",
+       x="Crowdedness bin (% of assayed TFs)")
+```
+
+## E
+
+```{r}
+mo2 <- readRDS("../09_crowdedness/motifDiff_vs_dist2TSS.rds")
+cortest <- with(mo2, cor.test(log10(meanDistToTSS), (pmax(0,crwdBound)-pmax(0,nonCrwdBound)), use="pairwise"))
+corp <- paste0("p=",format(cortest$p.value, digit=2))
+p.motif <- ggplot(mo2, aes(log10(meanDistToTSS), (pmax(0,crwdBound)-pmax(0,nonCrwdBound)), color=enr.Cscore)) +
+  geom_point() + geom_smooth(method="lm") + annotate("text", x=Inf, y=Inf, hjust=1, vjust=1, label=corp) +
+  theme_sleek() + scale_color_viridis_c(trans="log2") +
+  labs(x="log10(mean distance to TSS)", color="Predictivity\nof C-score\n(fold-\nenrichment)",
+       y="Crowded - non-crowded\ndifference in motif matching score")
+```
+
+
+## Assembly
+
+```{r, fig.height=12, fig.width=10}
+pdf("supp_crowdedness.pdf", height=12, width=10)
+plot_grid(p.enr, grid.grabExpr(draw(p.tfs)), p.rhm,
+          plot_grid(p.cnr, p.motif, nrow=1, scale=0.95, labels=LETTERS[4:5]),
+          nrow=4, rel_heights=c(3,2.9,3.4,2.4), labels="AUTO", scale=c(0.95,0.95,0.95,1))
+dev.off()
+```
+

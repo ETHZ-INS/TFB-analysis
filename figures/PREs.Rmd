@@ -1,0 +1,100 @@
+
+---
+
+```{r}
+suppressPackageStartupMessages({
+  library(data.table)
+  library(MultiAssayExperiment)
+  library(ggplot2)
+  library(cowplot)
+  library(patchwork)
+  library(GenomicRanges)
+  library(pdftools)
+  source("../utils/plot_theme.R")
+})
+subTitleSize <- 10
+```
+
+```{r}
+PREs <- readRDS("../00_data_preparation/01_consensus_regions/hybrid.custom.hg38.resized.resplit.rds")
+pip <- readRDS("../00_data_preparation/01_consensus_regions/peaks_in_consensusRegions.rds")
+```
+
+```{r, fig.width=10, fig.height=4}
+p1 <- ggplot(data.frame(width=width(PREs)), aes(width)) + geom_histogram(fill=siteOverallColors[1], center=0, bins=60) + 
+  theme_bw() + scale_x_sqrt(breaks=c(100,250,500,1000,2000)) + geom_vline(xintercept = median(width(PREs)), linetype="dashed") + 
+  labs(x="Width (bp)", y="Thousands of regions", subtitle="Assembly of 3.8M\nPutative Regulatory Elements (PREs)") + 
+  scale_y_continuous(breaks=(0:3)*200000, labels=(0:3)*200) +
+  annotate("text", x=220, y=450000, label="median:\n 191bp", hjust=0)+
+  theme_sleek()+
+  theme(plot.subtitle=element_text(size=subTitleSize))
+
+p2 <- ggplot(pip, aes(100*prop)) + geom_histogram(fill=tfContextColors[1], boundary=0, closed="right") + theme_bw() + 
+  labs(x="% of peaks within PREs", y="Number of TF/celltype",
+       subtitle=paste0("Across 3811 ENCODE ChIP-seq\nfor ", length(unique(pip$TF)), " TFs")) +
+  xlim(50,100) + 
+  annotate("text", x=50, y=950, vjust=1, hjust=0,
+           label=paste0("99.8% of all peaks\n are in PREs"))+
+  theme_sleek()+
+  theme(plot.subtitle=element_text(size=subTitleSize))
+
+p1 + p2
+```
+
+When aggregating across replicates, the proportion falls to 96.3% (`r round(100*sum(pip$prop*pip$nb)/sum(pip$nb))`), because the most reproducible peaks get counted only once.
+
+```{r}
+mae <- readRDS("../data/05_maeAll_conFeat_sub.rds")
+chipDt <- as.data.table(colData(experiments(mae)$ChIP))
+atacDt <- as.data.table(colData(experiments(mae)$ATAC))
+chipDt <- subset(chipDt, context %in% atacDt$rn)
+anno <- chipDt[,.(n_con=length(unique(context))), by=tfName]
+
+sub <- paste0(">12k ATAC-matched ChIP experiments:\n", length(unique(chipDt$tfName)), 
+              " TFs across ", length(unique(chipDt$context)), " cellular contexts")
+
+p3 <- ggplot(anno, aes(x=n_con)) + geom_histogram(fill=tfContextColors[1], center=1, bins=32) + theme_bw() + 
+    labs(x="Number of cellular contexts", y="Number of TFs", subtitle=sub) + scale_x_sqrt(breaks=c(1,5,15,60,150)) +
+  ggrepel::geom_text_repel(data=subset(anno, tfName=="CTCF"),
+                           aes(label=tfName, y=1), min.segment.length=0, nudge_x = -1, nudge_y = 50)+
+  theme_sleek()+
+  theme(plot.subtitle=element_text(size=subTitleSize))
+```
+
+```{r}
+res <- readRDS("../06_meta/motif_chip_overlaps.rds")
+res2 <- res[res$chipThreshold==50 & res$motifLength<40,]
+res2$motifThreshold <- factor(res2$motifThreshold)
+levels(res2$motifThreshold) <- c("Lenient matching (p<0.001)", "Default matching (p<5e-5)")
+p4 <- ggplot(res2[order(res2$motifIC),], aes(both/chip, both/motif, colour=pmin(35,motifIC))) +
+  geom_point() + facet_wrap(~motifThreshold) + scale_y_sqrt() + theme_bw() +
+  scale_color_viridis_c(breaks=c(5,35)) + 
+  labs(x="Proportion of peaks (in PREs) that have the motif", color="Motif\ntotal IC",
+       y="Proportion of motif matches\n(in PREs) that have a peak",
+       subtitle="Not only are most motif matches not bound, but for most TFs a large fraction of peaks fail to show a clear motif")+
+  theme_sleek()+
+  theme(plot.subtitle=element_text(size=subTitleSize))
+p4
+```
+
+```{r, fig.width=10, fig.height=6}
+scheme <- magick::image_read_pdf("../schemes/overview_main.pdf")
+scheme <- magick::image_ggplot(scheme) + 
+    #labs(tag="E") +
+    theme_nothing()+
+    theme(plot.tag=element_text(face="bold", size=16), 
+          axis.title.y=element_blank(), 
+          axis.text.y=element_blank())
+```
+
+```{r, fig.width=10, fig.height=6}
+pdf("Figure1.pdf", width=10, height=10)
+plot_grid(
+  plot_grid(p1, p2, p3, nrow=1, labels="AUTO", scale=0.95),
+  plot_grid(p4, labels="D", scale=0.95),
+  plot_grid(scheme, labels="E"),
+  nrow=3, rel_heights=c(3,4,4)
+)
+dev.off()
+```
+

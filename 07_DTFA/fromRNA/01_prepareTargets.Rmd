@@ -1,0 +1,98 @@
+---
+title: "Preparation of predictions and distal targets"
+output: html_document
+date: "2025-10-20"
+---
+
+```{r}
+suppressPackageStartupMessages({
+  library(MultiAssayExperiment)
+  library(data.table)
+  library(Matrix)
+  library(pbapply)
+})
+setDTthreads(4)
+```
+
+# Proximal CRE-gene links
+
+```{r}
+mae <- readRDS("../../data/01_maeAll.rds")
+regions <- rowRanges(experiments(mae)$ATAC)
+rm(mae)
+genes <- rtracklayer::import("/reference/Homo_sapiens/GENCODE/GRCh38.p14/Annotation/Release_46/gencode.v46.annotation.gtf")
+genes <- genes[genes$type=="transcript"]
+genes <- genes[which(genes$transcript_support_level<=2),]
+mcols(genes) <- mcols(genes[,c("gene_name","gene_id")])
+promUp <- promoters(genes, 2500,0)
+
+findLinks <- function(regions, p){
+  o <- findOverlaps(regions, p)
+  d <- data.frame(region.id=from(o), gene=p$gene_name[to(o)])
+  d[!duplicated(d),]
+}
+
+l1 <- findLinks(regions, promUp)
+l1$likelihood <- 1
+
+promUp <- promoters(genes, 5000,0)
+promDown <- promoters(genes, 0, 2000)
+promDown <- resize(promDown, fix="end", 1500)
+p <- c(promUp, promDown)
+p <- p[!duplicated(as.data.frame(p))]
+l2 <- findLinks(regions, p)
+l2 <- l2[which( !(l2$region.id %in% l1$region.id) ),]
+l2$likelihood <- 0.75
+d <- rbind(l1,l2)
+saveRDS(d, file="region2gene_proximal.rds")
+```
+
+
+# CollecTRI regulons
+
+```{r, eval=FALSE}
+# Last run 2025-12-15
+net <- decoupleR::get_collectri(organism = "human", split_complexes=TRUE)
+net <- net[!grepl("_", net$source),]
+net$source <- factor(net$source)
+net$target <- factor(net$target)
+net2 <- sparseMatrix(i=as.integer(net$target), j=as.integer(net$source), x=net$mor,
+                     dims=c(length(levels(net$target)), length(levels(net$source))),
+                     dimnames=list(levels(net$target), levels(net$source)))
+saveRDS(net2, file="collecTRI.rds")
+```
+
+
+# predictions for iPSC
+
+```{r}
+assembleContextPreds <- function(nc, verbose=TRUE){
+  lf <- list.files("../../data/predictions", pattern=paste0("pred_",nc,"_.+\\.tsv\\.gz$"),
+                     full=TRUE, recursive = TRUE)
+  names(lf) <- gsub("\\..+|.+_","",basename(lf))
+  
+  tmpf <- \(x){
+    x <- fread(x)$pred_stacked
+    w <- which(x>0)
+    data.frame(w=w, p=as.integer(1000*x[w]))
+  }
+  if(verbose){
+    pr <- pblapply(lf, tmpf)
+    message("Assembling...")
+  }else{
+    pr <- lapply(lf, tmpf)
+  }
+  pr <- sparseMatrix(i=unlist(lapply(pr, \(x) x$w)),
+                     j=rep(seq_along(pr), sapply(pr, nrow)),
+                     x=(unlist(lapply(pr, \(x) x$p)))/1000)
+  colnames(pr) <- names(lf)
+  pr
+}
+```
+
+```{r}
+# use ESC
+preds <- assembleContextPreds(254)
+saveRDS(preds, file="Nakatake2020/preds_ESC.rds")
+```
+

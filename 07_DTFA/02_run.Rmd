@@ -1,0 +1,244 @@
+---
+title: "Benchmark of TF activity from ATAC-seq (running methods)"
+output: html_document
+date: "2025-09-18"
+---
+
+```{r setup}
+suppressPackageStartupMessages({
+  library(SummarizedExperiment)
+  library(epiwraps)
+  library(chromVAR)
+  library(MultiAssayExperiment)
+  library(data.table)
+  library(universalmotif)
+  library(motifmatchr)
+  library(BiocParallel)
+  library(Matrix)
+  library(limma)
+  library(GenomicRanges)
+})
+BP <- SerialParam(progress=FALSE)
+source("functions.R")
+```
+
+
+```{r prep1}
+ds <- readRDS("benchmarkDatasets1.rds")
+
+mae <- readRDS("../data/01_maeAll.rds")
+regions <- rowRanges(experiments(mae)$ATAC)
+
+# include the best ChIP as positive control:
+contLabs <- read.delim("../data/predictions/meta.tsv", row.names = 1)
+ds$bestContext[which(ds$target=="NR3C1")] <- as.numeric(row.names(contLabs)[grep("A549.+Dex.+1_Hour", contLabs$context)])
+
+chips <- experiments(mae)$ChIP
+dsChips <- merge(as.data.frame(colData(chips)), ds, by.x=c("context","tfName"), by.y=c("bestContext","target"))
+
+maxPreds <- readRDS("maxPreds.rds")
+```
+
+```{r motifs}
+motifs <- readRDS("motifs.rds")
+```
+
+# Real benchmark datasets
+
+```{r realds}
+fromScratch <- TRUE
+addChip <- FALSE
+for(f in seq_len(nrow(ds))[!is.na(ds$bestContext) & ds$species!="mouse"]){
+  
+  tf <- ds$target[f]
+  print(tf)
+  dir.create(file.path("DTFAB",tf), FALSE)
+  
+  if(ds$species[f]=="human"){
+    genome <- Rsamtools::FaFile("/reference/Homo_sapiens/GENCODE/GRCh38.p14/Sequence/WholeGenomeFasta/GRCh38.primary_assembly.genome.fa")
+  }else{
+    genome <- Rsamtools::FaFile("/reference/Mus_musculus/GENCODE/GRCm38.p6/Sequence/WholeGenomeFasta/genome.fa")
+  }
+  
+  # get peak counts
+  counts <- readRDS(file.path("DTFAB", paste0(gsub("/2","",tf,fixed=TRUE),".rds")))
+  counts <- counts[rowSums(assay(counts))>0,]
+  
+  if(fromScratch){
+    # get chromVAR backgrounds
+    set.seed(123)
+    bg <- chromVAR::getBackgroundPeaks(counts, niterations=200)
+    saveRDS(bg, file.path("DTFAB", tf, "backgrounds.rds"))
+    
+    # prepare binding predictions
+    preds <- readRDS(paste0("preds_",gsub("-| ","",ds$system[f]),".rds"))
+    if(addChip && tf %in% dsChips$tfName){ # add the ChIP peaks
+      comb <- dsChips$combination[which(dsChips$tfName==tf)]
+      preds <- cbind(preds, pmax(0,assay(chips)[,comb]))
+      colnames(preds)[ncol(preds)] <- "ChIP"
+    }
+    if(FALSE && tf=="MYC"){
+      a <- rtracklayer::import("/mnt/plger/esonder/benchmark_finalized/benchmark_cleaned/predictions/maxATAC/all/MYC/K562_pred.bw")
+      o <- findOverlaps(regions, subject=a)
+      mam <- sapply(split(a$score[to(o)], from(o)), max)
+      mam2 <- rep(0, length(regions))
+      mam2[as.integer(names(mam))] <- as.numeric(mam)
+      preds <- cbind(preds, mam2)
+      colnames(preds)[ncol(preds)] <- "maxATAC"
+    }
+    preds2 <- getPredsForPeaks(counts, preds, regions)
+    saveRDS(preds2, file.path("DTFAB", tf, "preds.rds"))
+    maxPreds2 <- getPredsForPeaks(counts, maxPreds, regions)
+    saveRDS(maxPreds2, file.path("DTFAB", tf, "maxPreds.rds"))
+  }else{
+    bg <- readRDS(file.path("DTFAB", tf, "backgrounds.rds"))
+    preds2 <- readRDS(file.path("DTFAB", tf, "preds.rds"))
+    maxPreds2 <- readRDS(file.path("DTFAB", tf, "maxPreds.rds"))
+  }
+  # 
+  # fpreds <- readRDS("/mnt/nvme1/analysis/data/predictions_test_2/KLF1/predSe_re_KLF1.rds")
+  # fpreds <- sapply(assays(fpreds), as.numeric)
+  # fpreds2 <- getPredsForPeaks(counts, fpreds, regions)
+  # fpreds3 <- reweighPreds(fpreds2)
+  # colnames(fpreds3) <- paste0("rw_",colnames(fpreds3))
+  # fpreds3 <- cbind(fpreds2, fpreds3)
+  # tmp <- readRDS("regPreds.rds")
+  # tmp2 <- getPredsForPeaks(counts, as.matrix(tmp), regions)
+  # #tmp2 <- cbind(regPred=tmp2[,1], regPred_rw=reweighPreds(tmp2))
+  # fpreds3 <- cbind(fpreds3, regPred=pmax(0,tmp2[,1]-rowMedians(fpreds2)))
+  # dev <- epiwraps::computeDeviationsFaster(counts, fpreds3, backgrounds=bg, BPPARAM=BP)
+  # dev2 <- rbind(readRDS(file.path("DTFAB",tf,"preds_deviations.rds")), dev)
+  # groups <- rep(c("C","T"), each=ncol(counts)/2)
+  # res <- as.data.frame(topTable(eBayes(lmFit(assay(dev2,"deviations"), model.matrix(~groups))), number=Inf))
+
+  # compute deviations based on predictions
+  # # first weight predictions based on the region's median prediction
+  preds3 <- reweighPreds(preds2)
+  preds3 <- preds3[,colSums(preds3>0)>=10]
+  # contrarily to the original computeDeviations, this uses the probability as weight
+  dev <- epiwraps::computeDeviationsFaster(counts, preds3, backgrounds=bg, BPPARAM=BP)
+  saveRDS(dev, file.path("DTFAB",tf,"preds_deviations.rds"))
+  
+  # Differential TF activity
+  groups <- rep(c("C","T"), each=ncol(counts)/2)
+
+  res <- as.data.frame(topTable(eBayes(lmFit(assay(dev,"deviations"), model.matrix(~groups))), number=Inf))
+  saveRDS(res, file.path("DTFAB",tf,"preds_diffres.rds"))
+
+  # preds4 <- binweighPreds(preds2)  
+  # dev <- epiwraps::computeDeviationsFaster(counts, preds4[,colSums(preds4>0)>=10], backgrounds=bg, BPPARAM=BP)
+  # saveRDS(dev, file.path("DTFAB",tf,"predsBW_deviations.rds"))
+  # res <- as.data.frame(topTable(eBayes(lmFit(assay(dev,"deviations"), model.matrix(~groups))), number=Inf))
+  # saveRDS(res, file.path("DTFAB",tf,"predsBW_diffres.rds"))
+  # 
+  dev <- epiwraps::computeDeviationsFaster(counts, preds2[,colSums(preds2>0)>=10], backgrounds=bg, BPPARAM=BP)
+  saveRDS(dev, file.path("DTFAB",tf,"predsRaw_deviations.rds"))
+  res <- as.data.frame(topTable(eBayes(lmFit(assay(dev,"deviations"), model.matrix(~groups))), number=Inf))
+  saveRDS(res, file.path("DTFAB",tf,"predsRaw_diffres.rds"))
+
+  saveRDS(maxPreds2, file.path("DTFAB", tf, "maxPreds.rds"))
+  dev <- epiwraps::computeDeviationsFaster(counts, maxPreds2, backgrounds=bg, BPPARAM=BP)
+  saveRDS(dev, file.path("DTFAB",tf,"predsMax_deviations.rds"))
+  res <- as.data.frame(topTable(eBayes(lmFit(assay(dev,"deviations"), model.matrix(~groups))), number=Inf))
+  saveRDS(res, file.path("DTFAB",tf,"predsMax_diffres.rds"))
+  
+  if(fromScratch){
+    # Scan peaks for motif matches
+    mm <- matchMotifs(motifs, counts, genome=genome)
+    saveRDS(mm, file.path("DTFAB",tf,"motifMatches.rds"))
+  
+    # compute deviations based on motifs
+    dev <- epiwraps::computeDeviationsFaster(counts, mm, backgrounds=bg, BPPARAM=BP)
+    saveRDS(dev, file.path("DTFAB",tf,"motifs_deviations.rds"))
+  
+    # Differential TF activity
+    res <- as.data.frame(topTable(eBayes(lmFit(assay(dev,"deviations"), model.matrix(~groups))), number=Inf))
+    saveRDS(res, file.path("DTFAB",tf,"motifs_diffres.rds"))
+  }else{
+    mm <- readRDS(file.path("DTFAB",tf,"motifMatches.rds"))
+  }
+  
+  i <- intersect(colnames(preds3),colnames(mm))
+  preds4 <- t(t(preds3)>colQuantiles(preds3,p=0.95))
+  comb <- as.matrix(assay(mm))[,i] * preds4[,i]
+  # compute deviations based on combination
+  dev <- epiwraps::computeDeviationsFaster(counts, comb, backgrounds=bg, BPPARAM=BP)
+  saveRDS(dev, file.path("DTFAB",tf,"comb_deviations.rds"))
+
+  # Differential TF activity
+  res <- as.data.frame(topTable(eBayes(lmFit(assay(dev,"deviations"), model.matrix(~groups))), number=Inf))
+  saveRDS(res, file.path("DTFAB",tf,"comb_diffres.rds"))
+
+  gc(full=TRUE)
+}
+```
+
+# Semi-simulations
+
+```{r simds, eval=FALSE}
+ds <- list.files(file.path("DTFAB","simulations"), pattern="counts\\.rds$", full=TRUE)
+genome <- Rsamtools::FaFile("/reference/Homo_sapiens/GENCODE/GRCh38.p14/Sequence/WholeGenomeFasta/GRCh38.primary_assembly.genome.fa")
+preds <- readRDS("preds_Lymphoblastoids.rds")
+
+# add CTCF, MAZ and ZNF143
+motifs <- readRDS("motifs.rds")
+motifs2 <- readRDS("/mnt/germain/plger/tfbs_prep_clean/03_motif_aggregation/AllMotifs_onePerGene.rds")[c("CTCF","MAZ","ZNF143")]
+motifs2 <- do.call(TFBSTools::PWMatrixList, convert_motifs(motifs2, class="TFBSTools-PWMatrix"))
+motifs <- c(motifs,motifs2)
+
+redoPreds <- TRUE
+redoMotifs <- FALSE
+
+for(f in ds){
+  
+  bn <- gsub("\\.counts\\.rds$","",basename(f))
+  print(bn)
+  
+  dir.create(file.path("DTFAB","simulations",bn), FALSE)
+  
+  # get peak counts
+  counts <- readRDS(f)
+  counts <- counts[which(rowSums(assay(counts))>0),]
+  
+  if(redoPreds){
+    # prepare binding predictions
+    preds2 <- getPredsForPeaks(counts, preds, regions)
+    saveRDS(preds2, file.path("DTFAB", "simulations", bn, "preds.rds"))
+    preds3 <- reweighPreds(preds2)
+    preds3 <- preds3[,colSums(preds3>0)>=10]
+  }
+  
+  if(redoMotifs){  
+    # Scan peaks for motif matches
+    mm <- matchMotifs(motifs, counts, genome=genome)
+    saveRDS(mm, file.path("DTFAB", "simulations", bn, "motifMatches.rds"))
+  }
+  # get chromVAR backgrounds
+  set.seed(123)
+  bg <- chromVAR::getBackgroundPeaks(counts, niterations=200)
+  saveRDS(bg, file.path("DTFAB", "simulations", bn, "backgrounds.rds"))
+
+  groups <- rep(c("C","T"), each=ncol(counts)/2)
+  
+  if(redoPreds){
+    dev <- epiwraps::computeDeviationsFaster(as.matrix(assay(counts)), preds3, backgrounds=bg, BPPARAM=BP)
+    saveRDS(dev, file.path("DTFAB","simulations",bn,"preds_deviations.rds"))
+    
+    # Differential TF activity
+    res <- as.data.frame(topTable(eBayes(lmFit(assay(dev,"deviations"), model.matrix(~groups))), number=Inf))
+    saveRDS(res, file.path("DTFAB","simulations",bn,"preds_diffres.rds"))
+  }
+  
+  if(redoMotifs){
+    # compute deviations based on motifs
+    dev <- epiwraps::computeDeviationsFaster(as.matrix(assay(counts)), mm, backgrounds=bg, BPPARAM=BP)
+    saveRDS(dev, file.path("DTFAB","simulations",bn,"motifs_deviations.rds"))
+    
+    # Differential TF activity
+    res <- as.data.frame(topTable(eBayes(lmFit(assay(dev,"deviations"), model.matrix(~groups))), number=Inf))
+    saveRDS(res, file.path("DTFAB","simulations",bn,"motifs_diffres.rds"))
+  }
+  
+  gc(full=TRUE)
+}
+```

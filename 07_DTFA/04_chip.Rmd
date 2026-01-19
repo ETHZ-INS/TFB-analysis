@@ -1,0 +1,111 @@
+---
+title: "04_chip"
+output: html_document
+date: "2025-12-19"
+---
+
+
+```{r setup}
+suppressPackageStartupMessages({
+  library(GenomicRanges)
+  library(ggplot2)
+  library(patchwork)
+  library(cowplot)
+  library(MultiAssayExperiment)
+  library(BiocParallel)
+  library(sechm)
+})
+source("../utils/load_all.R", chdir=TRUE)
+```
+
+```{r, eval=TRUE}
+mae <- readRDS("../data/05_maeAll_conFeat_sub.rds")
+chip <- experiments(mae)$ChIP
+
+chip1 <- chip[,which(chip$context==287)] # brainTF neurons
+colnames(chip1) <- chip1$tfName
+chip1 <- as(assay(chip1), "sparseMatrix")
+saveRDS(chip1, file="chip_brainTFneurons.rds")
+
+chip <- chip[,which(chip$context==165)] # K562
+colnames(chip) <- chip$tfName
+chip <- as(assay(chip), "sparseMatrix")
+wRegions <- which(rowSums(chip)>0)
+chip <- chip[wRegions,]
+chip@x[which(chip@x<0)] <- 0.05
+
+# overlap coefficient
+chip.binary <- chip>0.15
+peaksPerTf <- colSums(chip.binary)
+tfs <- names(peaksPerTf)[peaksPerTf>=500]
+peaksPerTf <- peaksPerTf[tfs]
+overlaps <- crossprod(chip.binary[,tfs])
+
+minSize <- matrix(pmin(rep(peaksPerTf, length(peaksPerTf)), rep(peaksPerTf, each=length(peaksPerTf))), nrow=length(peaksPerTf))
+colnames(minSize) <- row.names(minSize) <- names(peaksPerTf)
+ch.oc <- overlaps/minSize
+
+ch.cor <- cor(as.matrix(chip[,tfs]))
+
+ch.cor2 <- cor(as.matrix(sqrt(chip[,tfs])))
+
+ro <- row.names(sortRows(cbind(ch.cor[tfs,tfs],ch.oc[tfs,tfs],ch.cor2[tfs,tfs])))
+se <- SummarizedExperiment(list(correlation=ch.cor[ro,ro], sqrt.cor=ch.cor2[ro,ro], overlapCoef=ch.oc[ro,ro]))
+se$nbPeaks <- peaksPerTf[colnames(se)]
+saveRDS(se, "chip_correlation_K562.rds")
+
+preds <- readRDS("preds_K562.rds")[wRegions,]
+tfs2 <- intersect(tfs,colnames(preds))
+preds.cor <- cor(as.matrix(preds[,tfs2]))
+
+preds.binary <- preds>0.9
+peaksPerTf <- colSums(preds.binary)
+tfs <- names(peaksPerTf)[peaksPerTf>=50]
+peaksPerTf <- peaksPerTf[tfs]
+overlaps <- crossprod(preds.binary[,tfs])
+minSize <- matrix(pmin(rep(peaksPerTf, length(peaksPerTf)), rep(peaksPerTf, each=length(peaksPerTf))), nrow=length(peaksPerTf))
+colnames(minSize) <- row.names(minSize) <- names(peaksPerTf)
+ch.oc <- overlaps/minSize
+
+saveRDS(preds.cor, "K562_preds_correlation.rds")
+```
+
+```{r, fig.width=12, fig.height=4.5}
+chmp <- function(x, ...){
+  Heatmap(x, cluster_rows = FALSE, cluster_columns = FALSE, show_column_names=FALSE, show_row_names=FALSE, ...)
+}
+
+se <- readRDS("chip_correlation_K562.rds")
+sechm(se, row.names(se), assayName = "sqrt.cor", cluster_rows = FALSE, sortRowsOn = NULL, column_title="Pearson correlation of\nreplicability scores") + 
+  sechm(se, row.names(se), assayName = "overlapCoef", cluster_rows = FALSE, sortRowsOn = NULL, column_title="Overlap coefficient", name="Overlap\ncoef", hmcols = viridis::viridis(101))
+
+predcor <- readRDS("K562_preds_correlation.rds")
+predoc <- as.matrix(readRDS("K562_preds_overlapCoef.rds"))
+
+tfs2 <- intersect(row.names(se), intersect(row.names(predcor), row.names(predoc)))
+se <- se[tfs2,tfs2]
+predcor <- predcor[tfs2,tfs2]
+predoc <- predoc[tfs2,tfs2]
+
+tmp <- cbind(assay(se, "correlation"),assay(se, "sqrt.cor"),assay(se, "overlapCoef"))
+ro <- row.names(sortRows(as.matrix(tmp)))
+se <- se[ro,ro]
+
+sechm(se, ro, assayName = "sqrt.cor", cluster_rows = FALSE, sortRowsOn = NULL, 
+      column_title="Pearson correlation of\nreplicability scores", name="ChIP\ncorrelation") + 
+  sechm(se, ro, assayName = "overlapCoef", cluster_rows = FALSE, sortRowsOn = NULL,
+        column_title="Overlap coefficient", name="Overlap\ncoef", hmcols = viridis::viridis(101)) + 
+  chmp(predcor[ro,ro], column_title = "Pearson correlation of\nprediction scores", name="Preds\ncorrelation") +
+  chmp(predoc[ro,ro], column_title = "Overlap coefficient of\nprediction scores", name="Preds\noverlap\ncoef")
+```
+
+```{r}
+ch2 <- readRDS("chip_brainTFoligos.rds")
+ch2@x[which(ch2@x<0)] <- 0.05
+ch2 <- as.matrix(ch2[rowSums(ch2)>0,])
+btf.bincor <- cor(ch2>.5)
+btf.cor <- cor(ch2)
+btf.cor <- sortRows(btf.cor)
+Heatmap(btf.bincor, name="cor")
+```
+

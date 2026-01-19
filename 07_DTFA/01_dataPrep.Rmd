@@ -1,0 +1,80 @@
+---
+title: "01 Data preparation"
+output: html_document
+date: "2025-09-18"
+---
+
+```{r}
+suppressPackageStartupMessages({
+  library(data.table)
+  library(Matrix)
+  library(pbapply)
+})
+setDTthreads(4)
+source("functions.R")
+```
+
+Preparing the per-context prediction matrices for the benchmark datasets
+
+```{r}
+ds <- data.frame(
+  target = c("NR3C1", "ESR1/2", "NR1H3", "NR1H4", "GATA1", "GATA2", "RUNX1", "RUNX2", "KLF1", "MYC", "BANP"),
+  perturbation = c(
+    "Agonist (Dexa.)", "Agonist (Estradiol)", "Agonist (GW3965)", "Agonist (GW4064)",
+    "CRISPRi KD", "CRISPRi KD", "CRISPRi KD", "CRISPRi KD", "CRISPRi KD", "CRISPRi KD", "dTAG KD"
+  ),
+  system = c(
+    "A549", "MCF-7", "Mouse liver", "Mouse liver",
+    "K562", "K562", "K562", "K562", "K562", "K562", "mouse ESC"
+  ),
+  species = c(
+    "human", "human", "mouse", "mouse", rep("human", 6), "mouse"),
+  delay = c("1h", "45min", "4h", "4h", "72h", "72h", "72h", "72h", "72h", "72h", "2h")
+)
+
+bestPredContext <- c("A549"=59,"MCF-7"=NA,"mouse ESC"=254,"K562"=165,"Mouse liver"=270,"Lymphoblastoids"=102,Fibroblasts=257)
+ds$bestContext <- bestPredContext[ds$system]
+
+saveRDS(ds, file="benchmarkDatasets1.rds")
+```
+
+We add to these the contexts used for the crowdedness analysis
+
+```{r}
+bestPredContext <- c(bestPredContext, GM12878 = "102", HepG2 = "156", K562 = "165", MCF_7 = "173", HEK293 = "260")
+
+for(n in names(bestPredContext)){
+  message("\n", n)
+  if(!is.na(nc <- bestPredContext[n])){
+    saveRDS(assembleContextPreds(nc), paste0("preds_", gsub("-| ","",n), ".rds"))
+    gc(verbose=FALSE)
+  }
+}
+```
+
+Preparing the max predicted score matrix:
+
+```{r}
+lf <- list.files("../data/predictions", pattern="maxpred\\.txt\\.gz$", recursive = TRUE, full=TRUE)
+names(lf) <- basename(dirname(lf))
+m <- sapply(lf, \(x) as.data.frame(data.table::fread(x))[,1])
+m <- as(m, "sparseMatrix")
+saveRDS(m, file="maxPreds.rds")
+cc <- cor(as.matrix(m))
+saveRDS(cc, file="maxPreds_correlations.rds")
+```
+
+Preparing the corresponding motifs:
+
+```{r}
+library(universalmotif)
+motifs <- readRDS("../00_data_preparation/03_motif_aggregation/AllMotifs_onePerGene.rds")
+# inject back a good GR motif:
+hoco <- readRDS("../00_data_preparation/03_motif_aggregation/H12CORE.motifs.rds")
+motifs$GCR <- hoco$GCR.0.PS.A
+motifs <- motifs[c(colnames(m), "GCR")]
+motifs <- do.call(TFBSTools::PWMatrixList, convert_motifs(motifs, class="TFBSTools-PWMatrix"))
+stopifnot(all(!sapply(motifs, \(x) is(try(motifmatchr::pwmType(x),silent=TRUE), "try-error"))))
+saveRDS(motifs, file="motifs.rds")
+```
+

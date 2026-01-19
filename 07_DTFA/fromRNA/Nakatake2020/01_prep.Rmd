@@ -1,0 +1,102 @@
+---
+title: "Prepare data objects"
+output: html_document
+date: "2025-10-02"
+---
+
+```{r setup}
+suppressPackageStartupMessages({
+  library(Matrix)
+  library(SingleCellExperiment)
+  library(GenomicRanges)
+  library(BiocParallel)
+  library(data.table)
+  library(anndataR)
+})
+BP <- MulticoreParam(10, progress=TRUE)
+source("../../functions.R")
+```
+
+# Prepare predictions and linking data
+
+```{r, eval=TRUE}
+preds <- readRDS("preds_ESC.rds")
+r <- readRDS("../../../00_data_preparation/01_consensus_regions/hybrid.custom.hg38.resized.resplit.rds")
+# ENCODE distal links:
+lf <- list.files("e2g", pattern="bed\\.gz$", full=TRUE)
+edl <- lapply(lf, \(x){
+  e2g <- data.table::fread(x, header = TRUE)
+  GRanges(e2g$`#chr`, IRanges(e2g$start, e2g$end), target=e2g$TargetGene, score=e2g$Score)
+})
+edl2 <- sort(unlist(GRangesList(edl)))
+o <- findOverlaps(edl2, r)
+d <- data.table(region=to(o), gene=as.factor(edl2$target[from(o)]), score=edl2$score[from(o)])
+d2 <- d[,.(mean=mean(score)), by=.(region, gene)]
+
+proxLinks <- readRDS("../region2gene_proximal.rds")
+proxLinks$gene <- factor(proxLinks$gene, c(levels(d2$gene), setdiff(unique(sort(proxLinks$gene)), levels(d2$gene))))
+levels(d2$gene) <- levels(proxLinks$gene)
+proxLinks <- data.table(region=proxLinks$region.id, gene=proxLinks$gene, mean=1)
+d3 <- rbind(d2, proxLinks)
+d3 <- d3[,.(score=max(mean)), by=.(region, gene)]
+
+m <- sparseMatrix(i=as.integer(d3$region), j=as.integer(d3$gene), x=d3$score, dims=c(length(r), length(levels(d3$gene))))
+colnames(m) <- levels(d3$gene)
+saveRDS(m, "links.rds")
+```
+
+
+
+# Prepare motifs
+
+```{r, eval=TRUE}
+w <- which(rowSums(m)>0)
+regions <- r[w]
+genome <- "/reference/Homo_sapiens/GENCODE/GRCh38.p14/Sequence/WholeGenomeFasta/GRCh38.primary_assembly.genome.fa"
+motifs <- readRDS("/mnt/nvme1/analysis/09_DTFA/motifs.rds")
+moi <- motifmatchr::matchMotifs(motifs, regions, genome=Rsamtools::FaFile(genome))
+saveRDS(moi, file="motifMatches.rds")
+```
+
+
+# Prepare perturbation data
+
+```{r}
+# data downloaded from https://zenodo.org/records/15115945
+sce <- anndataR::read_h5ad("Nakatake2020.h5ad", as = "SingleCellExperiment")
+sce <- sce[rowData(sce)$means>=1,]
+sce <- sechm::log2FC(sce, "X", sce$is_control, isLog = TRUE)
+sce$condition <- sce$perturbation
+sce$condition[which(sce$condition %in% c("CAG-rtTA35-IH","Emerald"))] <- "Control"
+sce$condition <- relevel(sce$condition, "Control")
+sce <- sce[,which(table(sce$condition)[sce$condition]>=2 )]
+sce$condition <- droplevels(sce$condition)
+mm <- readRDS("links.rds")
+i <- intersect(row.names(sce), colnames(mm))
+
+# compute QC on perturbations
+sp <- split(seq_len(ncol(sce)), sce$condition)
+pqc <- data.frame( row.names=names(sp), ndegs=sapply(sp, \(x) mean(sce$DEG[x])),
+                   pcor=sapply(sp, \(i){
+                          cc <- cor(assay(sce)[,i,drop=FALSE])
+                          mean(as.numeric(cc[lower.tri(cc)]))
+                        }) )
+highqc.perturb <- row.names(pqc)[which(pqc$ndegs>=20 & pqc$pcor>0.3)]
+
+sce <- sce[,which(sce$condition %in% c("Control", highqc.perturb))]
+se <- as(sce, "SummarizedExperiment")
+row.names(se) <- row.names(sce)
+saveRDS(se, file="perturb_prepared.SE.rds")
+```
+
+
+# Prepare collecTRI regulons
+
+```{r}
+net2 <- readRDS("../collecTRI.rds")
+i <- intersect(row.names(se), row.names(net2))
+net2 <- net2[i,]
+net2 <- removeColinearity(net2, tryKeep=as.character(unique(se$condition)))
+saveRDS(net2, file="collecTRI.filtered.rds")
+```
+

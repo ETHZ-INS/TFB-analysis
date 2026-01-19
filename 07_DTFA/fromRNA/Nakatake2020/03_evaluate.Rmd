@@ -1,0 +1,103 @@
+---
+title: "Run methods"
+output: html_document
+date: "2025-10-02"
+---
+
+```{r setup}
+suppressPackageStartupMessages({
+  library(Matrix)
+  library(SummarizedExperiment)
+  library(limma)
+  library(ComplexHeatmap)
+})
+source("../../../utils/load_all.R", chdir = TRUE)
+source("../../functions.R")
+```
+
+```{r, fig.width=4.5, fig.height=3}
+TFpreds <- colnames(readRDS("preds_ESC.rds"))
+TFcollect <- colnames(readRDS("collecTRI.filtered.rds"))
+collecTRI <- readRDS("res_logCPM_collecTRI.fastMLM.SE.rds")
+TFperturbed <- levels(collecTRI$condition)[-1]
+TFlists <- list(predictions=TFpreds, collecTRI=TFcollect, perturbed=TFperturbed)
+saveRDS(TFlists, file="TFlists.rds")
+UpSet(make_comb_mat(TFlists))
+```
+
+
+
+```{r}
+doDiffA <- function(res){
+  if(is.character(res)) res <- readRDS(res)
+  res$condition <- droplevels(res$condition)
+  mm <- model.matrix(~res$condition)
+  colnames(mm) <- gsub("res$condition","",colnames(mm),fixed=TRUE)
+  fit <- eBayes(lmFit(assay(res), mm))
+  names(ic) <- ic <- colnames(mm)[-1]
+  tres <- lapply(ic, \(x) as.data.frame(topTable(fit, x, Inf))[,c(1,3:5)])
+  
+  tres2 <- data.frame( row.names = names(tres) )
+  for(f in c(5,10,30))
+    tres2[[paste0("inTop",f)]] <- sapply(names(tres), \(n) n %in% head(row.names(tres[[n]]),f))
+  tres2$isAnnotated <- sapply(names(tres), \(n) n %in% row.names(tres[[n]]))
+  
+  tres2$t <- sapply(names(tres), \(x) tres[[x]][x,"t"])
+  tres2$isSig <- sapply(names(tres), \(x) tres[[x]][x,"adj.P.Val"]<0.05)
+
+  list(allRes=tres, summary=tres2)
+}
+```
+
+```{r}
+lf <- list.files(pattern="fastMLM\\.SE\\.rds")
+names(lf) <- gsub("\\.fastMLM\\.SE\\.rds", "", lf)
+o <- lapply(lf, doDiffA)
+saveRDS(o, "results.rds")
+
+tt <- as.data.frame(t(sapply(o, \(x) colSums(x$summary[,1:4]))))
+tt <- tt[order(-tt$inTop10/tt$isAnnotated),]
+
+tt2 <- tt[c("noInterLogCPM_predsReweigh.norm", "noInter_prox.norm", "collecTRI", "motifs.raw"),]
+tt2$method <- c("Predictions+Links", "Predictions\n(Promoters only)", "collecTRI", "Motifs+Links")
+tt2$propTop10 <- tt2$inTop10/tt2$isAnnotated
+
+tv <- sapply(o, \(x) x$summary[,"t"])
+tv <- dplyr::bind_rows(lapply(o, \(x) data.frame(Target=row.names(x$summary), t=x$summary[,c("t","inTop10","isAnnotated")])), .id="method")
+
+ggplot(tt2, aes(reorder(method, -inTop10), inTop10)) + geom_col() + theme_sleek() + 
+  labs(y="Number of perturbations detected (in top 10)", x=NULL) +
+  ggplot(tt2, aes(reorder(method, -propTop10), propTop10)) + geom_col() + theme_sleek() + 
+  labs(y="Proportion of annotated TFs detected (in top 10)", x=NULL)
+
+
+getAnnotated <- \(x) row.names(x$summary)[x$summary$isAnnotated]
+sum2 <- o$predsReweigh.norm$summary
+tfs <- intersect(getAnnotated(o$predsReweigh.norm), getAnnotated(o$collecTRI))
+t(sapply(o, \(x) colSums(x$summary[tfs,1:4])))
+```
+
+
+```{r, fig.width=4.5, fig.height=3}
+identified <- lapply(o, \(x) names(which(rowSums(x$summary[,1:2])>0)))
+notInCollecTRI <- unique(setdiff(unlist(identified[-1]), identified[[1]]))
+
+UpSet(make_comb_mat(setNames(identified[row.names(tt2)], tt2$method)))
+```
+
+
+```{r}
+se <- readRDS("prox.norm.fastMLM.SE.rds")
+
+tfs <- intersect(notInCollecTRI, identified$preds.norm)
+tfs <- setdiff(tfs, c("FOXM1"))
+
+d <- meltSE(se[,se$condition %in% c("Control", tfs)], tfs)
+d$condition <- droplevels(d$condition)
+d <- d[which(d$condition==d$feature | d$condition=="Control"),]
+d$class <- ifelse(d$condition=="Control", "CTRL", "OE")
+ggplot(d, aes(class, a, fill=class)) + geom_boxplot(outliers = FALSE) + 
+  geom_jitter(position=position_dodge2()) +
+  facet_wrap(~feature, scale="free") + theme_bw()
+```
+

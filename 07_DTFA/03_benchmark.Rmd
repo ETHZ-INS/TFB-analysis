@@ -1,0 +1,175 @@
+---
+title: "Benchmark of TF activity from ATAC-seq (results evaluation)"
+output: html_document
+date: "2025-09-25"
+---
+
+```{r setup}
+suppressPackageStartupMessages({
+  library(ggplot2)
+  library(patchwork)
+})
+
+
+getBenchmarkMetrics <- function(x, truth, interactors=NULL){
+  if(is.null(interactors)){
+    interactors <- readRDS("DTFAB/allInteractors.rds")
+    interactors$GCR <- interactors$NR3C1
+  }
+  if(is.null(x$p)){
+    x$p <- x$P.Value
+    x$padj <- x$adj.P.Val
+  } 
+  if(is.na(x$p[1]))
+    return(data.frame(rank=NA_integer_, trueQ=NA, FDR=NA_real_,
+                      AUC=NA_real_, relAUC=NA_real_))
+  if(!is.null(interactors)){
+    if(is.list(interactors)){
+      cofactors <- unique(c(truth, unlist(interactors[truth])))
+    }else{
+      cofactors <- union(truth, interactors)
+    }
+    cappedNCof <- min(length(cofactors),100)
+    optimalAUC <- sum(cumsum(c(rep(1,cappedNCof),
+                               rep(0,100-cappedNCof)))/seq_len(100))
+  }
+  w <- head(which(row.names(x) %in% truth),1)
+  w2 <- head(which(row.names(x)[order(-abs(x$logFC))] %in% truth),1)
+  if(length(w)==0){
+    #w <- nrow(x)+1L
+    w <- NA_integer_
+    trueQ <- 1
+    t <- NA_real_
+  }else{
+    trueQ <- x[w,"padj"]
+    t <- x[w,"t"]
+  }
+  if(!is.null(interactors)){
+    x$isCofactor <- row.names(x) %in% cofactors
+    tmp <- head(x$isCofactor,100)
+    auc <- sum(cumsum(tmp)/seq_along(tmp))
+    relAUC=auc/optimalAUC
+  }else{
+    x$isCofactor <- row.names(x) %in% truth
+    relAUC <- auc <- NA_real_
+  }
+  
+  if(is.null(x$padj)) x$padj <- x$adj.P.Val
+  xsig <- x[which(x$padj<0.05),,drop=FALSE]
+  data.frame(rank=w, dev.rank=w2, trueQ=trueQ, t=t,
+             FDR=sum(!xsig$isCofactor)/nrow(xsig),
+             AUC=auc, relAUC=relAUC)
+}
+```
+
+```{r}
+tf <- "KLF1"
+preds <- readRDS(file.path("DTFAB", tf, "preds.rds"))
+counts <- readRDS(paste0("DTFAB/", tf, ".rds"))
+bg <- readRDS(file.path("DTFAB", tf, "backgrounds.rds"))
+devO <- readRDS(file.path("DTFAB", tf, "preds_deviations.rds"))
+resO <- readRDS(file.path("DTFAB", tf, "preds_diffres.rds"))
+counts <- counts[rowSums(assay(counts))>0,]
+#LSD::heatscatter(log1p(rowSums(assay(co))), rowMedians(preds))
+```
+
+
+```{r, fig.width=10, fig.height=4}
+resl <- list.files("DTFAB", pattern="diffres", recursive = TRUE, full=TRUE)
+resl <- resl[grep("simulations",resl,invert=TRUE)]
+names(resl) <- resl
+res2 <- lapply(resl[grep("preds", names(resl))], \(x) readRDS(x))
+res <- lapply(setNames(resl, resl), \(x){
+  tryCatch({
+    tf <- basename(dirname(x))
+    x <- readRDS(x)
+    d <- getBenchmarkMetrics(x, tf)
+    w <- which(row.names(x)=="ChIP")
+    d$ChIP <- ifelse(length(w)==1, w, NA_integer_)
+    d
+  }, error=\(e) NULL)
+})
+# append the res of the corrected GR motif:
+res[["DTFAB/NR3C1/motifsGR_diffres.rds"]] <- 
+  getBenchmarkMetrics(readRDS("DTFAB/NR3C1/motifs_diffres.rds"), "GCR")
+
+res <- dplyr::bind_rows(res[!sapply(res,is.null)], .id="file")
+res$TF <- basename(dirname(res$file))
+res$method <- gsub("_diffres\\.rds","",basename(res$file))
+
+res2 <- res[res$method %in% c("motifs","motifsGR","predsRaw","preds"),]
+res2$method <- gsub("preds","predictions",res2$method)
+res2$method <- as.factor(gsub("motifsGR","motifs\n(corrected GR motif)",res2$method))
+levels(res2$method)[3:4] <- c("predictions\n(re-weighed)","predictions\n(raw)")
+res2$t[which(res2$TF!="NR3C1")] <- -res2$t[which(res2$TF!="NR3C1")]
+saveRDS(res2, file="DTFAB_results.rds")
+
+colors <- setNames(c("#0072B2", "#56B4E9", "#E69F00","#D55E00"), levels(res2$method))
+
+ggplot(res2, aes(TF, dev.rank, fill=method)) + geom_col(position=position_dodge()) + scale_y_sqrt(breaks=c(1,10,50,200,600)) + theme_bw() + 
+  ylab("Rank of true TF (lower=better)") + scale_fill_manual(values=colors) +
+  #ggplot(res, aes(TF, dev.rank, fill=method)) + geom_col(position=position_dodge()) + scale_y_sqrt(breaks=c(1,10,50,200,600)) + theme_bw() + ylab("dev rank of true TF") + 
+ggplot(res2, aes(TF, t, fill=method)) + geom_col(position=position_dodge()) + theme_bw() + ylab("t-value (higher=better)") + scale_y_continuous(transform = signedSqrt) + scale_fill_manual(values=colors) +
+ggplot(res2, aes(TF, relAUC, fill=method)) + geom_col(position=position_dodge()) +  theme_bw() + ylab("Network score (higher=better)") +
+  scale_fill_manual(values=colors) + plot_layout(guides="collect") & theme(legend.position = "bottom", axis.title.x = element_blank())
+#ggplot(res, aes(TF, ChIP, fill=method)) + geom_col(position=position_dodge()) +  theme_bw() + ylab("Rank of ChIP")
+```
+
+
+```{r, fig.width=4, fig.height=4.5}
+seP <- readRDS("DTFAB/GATA1/preds_deviations.rds")
+seM <- readRDS("DTFAB/GATA1/motifs_deviations.rds")
+assay(seM) <- as.matrix(assay(seM))
+seM <- seM[which(matrixStats::rowVars(assay(seM))>0),]
+i <- intersect(row.names(seM), row.names(seP))
+se <- SEtools::mergeSEs(list("Motif-based\nactivity"=seM,
+                             "Prediction\n-based\nactivity"=seP), do.scale = FALSE)
+se$condition <- ifelse(grepl("CTRL", colnames(se)), "CTRL", "KD")
+metadata(se)$anno_colors <- list(condition=c(CTRL="lightgrey", "KD"="darkred"))
+draw(sechm(se, i, cluster_rows = TRUE, top_annotation = "condition", column_title_gp=gpar(fontsize=10)), merge=TRUE)
+
+
+seP <- readRDS("DTFAB/KLF1/preds_deviations.rds")
+seM <- readRDS("DTFAB/KLF1/motifs_deviations.rds")
+assay(seM) <- as.matrix(assay(seM))
+se2 <- SEtools::mergeSEs(list("Motif-based\nactivity"=seM,
+                             "Prediction-based\nactivity"=seP), do.scale = FALSE)
+se2$condition <- ifelse(grepl("CTRL", colnames(se2)), "CTRL", "KD")
+metadata(se2)$anno_colors <- list(condition=c(CTRL="lightgrey", "KD"="darkred"))
+sechm(se2, i, cluster_rows = TRUE, top_annotation = "condition", column_title_gp=gpar(fontsize=10))
+
+m <- assay()
+```
+
+
+# Semi-simulations
+
+```{r}
+resl <- list.files("DTFAB/simulations", pattern="diffres", recursive = TRUE, full=TRUE)
+res <- dplyr::bind_rows(lapply(setNames(resl, resl), \(f){
+  tryCatch({
+    tf <- gsub("_.+","",basename(dirname(f)))
+  x <- readRDS(f)
+  if(tf=="CEBPB") tf <- grep("^CEBP", row.names(x), value=TRUE)
+  getBenchmarkMetrics(x, tf)
+  }, error=function(e){
+    warning(f, " failed")
+    NULL
+  })
+}), .id="file")
+res$TF <- gsub("_.+","",basename(dirname(res$file)))
+sp <- strsplit(basename(dirname(res$file)), "_")
+res$paradigm <- sapply(sp, \(x) x[2])
+res$effectSize <- sapply(sp, \(x) x[3])
+res$effectSize <- factor(res$effectSize, unique(res$effectSize))
+res$method <- ifelse(grepl("motifs", res$file), "motifs", "preds")
+
+ggplot(res, aes(effectSize, rank, color=method, group=method)) + geom_line() +
+  scale_y_sqrt(breaks=c(1,10,50,200,600)) + theme_bw() + ylab("Rank of true TF") +
+  facet_wrap(~TF+paradigm, scale="free") +
+  ggplot(res, aes(effectSize, t, color=method, group=method)) + geom_line() +
+    theme_bw() + ylab("t-value") +
+    facet_wrap(~TF+paradigm, scale="free") +
+  plot_layout(guides="collect")
+```
+

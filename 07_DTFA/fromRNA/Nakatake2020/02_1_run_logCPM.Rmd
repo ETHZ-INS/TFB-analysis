@@ -1,0 +1,146 @@
+---
+title: "Run methods"
+output: html_document
+date: "2025-10-02"
+---
+
+```{r setup}
+suppressPackageStartupMessages({
+  library(Matrix)
+  library(SingleCellExperiment)
+  library(BiocParallel)
+})
+BP <- MulticoreParam(20, progress=TRUE)
+source("../../functions.R")
+```
+
+# CollecTRI
+
+```{r, eval=FALSE}
+se <- readRDS("perturb_prepared.SE.rds")
+net <- readRDS("collecTRI.filtered.rds")
+res <- fastMLM(assay(se[row.names(net),], "X"), as.matrix(net), BPPARAM=BP)
+saveRDS(SummarizedExperiment(list(a=res), colData=colData(se)), file="res_logCPM_collecTRI.fastMLM.SE.rds")
+```
+
+# Motifs
+
+```{r, eval=TRUE}
+se <- readRDS("perturb_prepared.SE.rds")
+moi <- readRDS("motifMatches.rds")
+links <- readRDS("links.rds")
+links <- links[which(rowSums(links)>0),]
+links <- links[,which(colSums(links)>0)]
+
+selGenes <- intersect(colnames(links), row.names(se))
+selMotifs <- intersect(colnames(moi), c(se$condition, row.names(se)))
+links <- links[,selGenes]
+
+# crossprod to obtain motif-to-gene links
+mo1 <- as.matrix(t(crossprod(assay(moi)[,selMotifs], links)))
+mo1 <- removeColinearity(mo1, tryKeep=se$perturbation)
+# normalize to sum of motifs per genes
+mo2 <- mo1/colSums(links)
+
+res1 <- fastMLM(assay(se[selGenes,], "X"), sqrt(as.matrix(mo1)), BPPARAM=BP)
+res2 <- fastMLM(assay(se[selGenes,], "X"), as.matrix(mo2), BPPARAM=BP)
+saveRDS(SummarizedExperiment(list(a=res1), colData=colData(se)), file="res_logCPM_motifs.raw.fastMLM.SE.rds")
+saveRDS(SummarizedExperiment(list(a=res2), colData=colData(se)), file="res_logCPM_motifs.norm.fastMLM.SE.rds")
+```
+
+Only promoters:
+
+```{r}
+regions <- readRDS("../../../00_data_preparation/01_consensus_regions/hybrid.custom.hg38.resized.resplit.rds")
+proxLinks <- readRDS("../region2gene_proximal.rds")
+proxLinks$gene <- factor(proxLinks$gene)
+
+prox <- sparseMatrix(i=proxLinks$region.id, j=as.integer(proxLinks$gene),
+                      dim=c(length(regions), length(levels(proxLinks$gene))),
+                      dimnames=list(NULL, levels(proxLinks$gene)))
+links <- readRDS("links.rds")
+w1 <- which(rowSums(links)>0)
+w <- which(rowSums(prox)>0)
+w2 <- which(w1 %in% w)
+# crossprod to obtain motif-to-gene links
+mo1 <- as.matrix(t(crossprod(assay(moi)[w2,selMotifs], prox[w,])))
+mo1 <- removeColinearity(mo1, tryKeep=se$perturbation)
+selGenes <- intersect(selGenes, row.names(mo1))
+res1 <- fastMLM(assay(se[selGenes,], "X"), as.matrix(mo1[selGenes,]), BPPARAM=BP)
+saveRDS(SummarizedExperiment(list(a=res1), colData=colData(se)), file="res_logCPM_proxMotifs.raw.fastMLM.SE.rds")
+```
+
+
+# Using predictions
+
+```{r, eval=TRUE}
+se <- readRDS("perturb_prepared.SE.rds")
+preds <- readRDS("preds_ESC.rds")
+links <- readRDS("links.rds")
+w <- which(rowSums(links)>0)
+preds <- preds[w,]
+links <- links[w,which(colSums(links)>0)]
+
+selGenes <- intersect(colnames(links), row.names(se))
+links <- links[,selGenes]
+se <- se[selGenes,]
+selTFs <- intersect(colnames(preds), c(se$condition, selGenes))
+preds <- preds[, selTFs]
+preds2 <- reweighPreds(as.matrix(preds))
+
+# crossprod to obtain TF-to-gene matrix
+m1 <- t(crossprod(preds, links))
+m_re1 <- t(crossprod(preds2, links))
+# normalize to sum of e2g links for that gene
+m2 <- m1/colSums(links)
+m_re2 <- m_re1/colSums(links)
+
+res1 <- fastMLM(assay(se, "X"), sqrt(as.matrix(m1)), BPPARAM=BP)
+saveRDS(SummarizedExperiment(list(a=res1), colData=colData(se)), file="res_logCPM_preds.raw.fastMLM.SE.rds")
+res2 <- fastMLM(assay(se, "X"), as.matrix(m2), BPPARAM=BP)
+saveRDS(SummarizedExperiment(list(a=res2), colData=colData(se)), file="res_logCPM_preds.norm.fastMLM.SE.rds")
+res3 <- fastMLM(assay(se, "X"), sqrt(as.matrix(m_re1)), BPPARAM=BP)
+saveRDS(SummarizedExperiment(list(a=res3), colData=colData(se)), file="res_logCPM_predsReweigh.raw.fastMLM.SE.rds")
+res4 <- fastMLM(assay(se, "X"), as.matrix(m_re2), BPPARAM=BP)
+saveRDS(SummarizedExperiment(list(a=res4), colData=colData(se)), file="res_logCPM_predsReweigh.norm.fastMLM.SE.rds")
+```
+
+
+Only promoters:
+
+```{r}
+se <- readRDS("perturb_prepared.SE.rds")
+regions <- readRDS("../../../00_data_preparation/01_consensus_regions/hybrid.custom.hg38.resized.resplit.rds")
+proxLinks <- readRDS("../region2gene_proximal.rds")
+proxLinks$gene <- factor(proxLinks$gene)
+prox <- sparseMatrix(i=proxLinks$region.id, j=as.integer(proxLinks$gene),
+                      dim=c(length(regions), length(levels(proxLinks$gene))),
+                      dimnames=list(NULL, levels(proxLinks$gene)))
+w <- which(rowSums(prox)>0)
+preds <- readRDS("preds_ESC.rds")
+preds <- preds[w,]
+prox <- prox[w,]
+
+selGenes <- intersect(colnames(prox), row.names(se))
+se <- se[selGenes,]
+prox <- prox[,selGenes]
+selTFs <- intersect(colnames(preds), c(se$condition, selGenes))
+preds <- preds[,selTFs]
+
+preds2 <- reweighPreds(as.matrix(preds))
+
+m <- t(crossprod(preds, prox))
+m2 <- m/rowSums(m)
+m_re <- t(crossprod(preds2, prox))
+m_re2 <- m_re/rowSums(m_re)
+
+res1 <- fastMLM(assay(se, "X"), as.matrix(m), BPPARAM=BP)
+saveRDS(SummarizedExperiment(list(a=res1), colData=colData(se)), file="res_logCPM_prox.raw.fastMLM.SE.rds")
+res2 <- fastMLM(assay(se, "X"), as.matrix(m2), BPPARAM=BP)
+saveRDS(SummarizedExperiment(list(a=res2), colData=colData(se)), file="res_logCPM_prox.norm.fastMLM.SE.rds")
+res3 <- fastMLM(assay(se, "X"), sqrt(as.matrix(m_re)), BPPARAM=BP)
+saveRDS(SummarizedExperiment(list(a=res3), colData=colData(se)), file="res_logCPM_proxReweigh.raw.fastMLM.SE.rds")
+res4 <- fastMLM(assay(se, "X"), as.matrix(m_re2), BPPARAM=BP)
+saveRDS(SummarizedExperiment(list(a=res4), colData=colData(se)), file="res_logCPM_proxReweigh.norm.fastMLM.SE.rds")
+```
+

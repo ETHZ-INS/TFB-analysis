@@ -1,0 +1,76 @@
+---
+title: "Compilation of hyperparameter data"
+output: html_document
+---
+
+
+```{r}
+suppressPackageStartupMessages({
+  library(ggplot2)
+  library(data.table)
+})
+setDTthreads(4)
+source("../utils/load_all.R", chdir=TRUE)
+```
+
+
+```{r}
+hpFiles <- list.files("../data/predictions", recursive=TRUE, 
+                        pattern="hyperParams_", full.names=TRUE)
+names(hpFiles) <- basename(dirname(hpFiles))
+hp <- lapply(hpFiles, function(hpFile){
+  hp <- tryCatch({
+    hp <- fread(hpFile)
+    tf <- basename(dirname(hpFile))
+    as.data.frame(hp)
+  }, error=function(e){ NULL })
+  if(is.null(hp)) return(NULL)
+  hp$trainset <- hp$holdout_set <- NULL
+  tryCatch({
+    mod <- TFBlearner::loadModels(file.path(dirname(hpFile), 
+                                  paste0(paste("model",tf, sep="_"), ".txt")))
+    modDt <- data.frame(num_trees=c(mod$all_pos$num_trees(),
+                                    mod$all_weighted_pos$num_trees(),
+                                    mod$med_weighted_pos$num_trees(),
+                                    mod$top_weighted_pos$num_trees()), 
+                        submodel=c("all_pos", "all_weighted_pos", 
+                                   "med_weighted_pos", "top_weighted_pos"))
+    merge(hp, modDt, by="submodel")
+  }, error=function(e){
+    hp$num_trees <- NA
+    hp
+  })
+})
+table((hpIsNull <- sapply(hp, is.null)))
+hp <- dplyr::bind_rows(hp[!hpIsNull], .id="TF")
+hp$sumLearning <- hp$learning_rate*hp$num_trees
+hp$tree_complexity <- hp$sumLearning*hp$num_leaves
+saveRDS(hp, file="hyperparams.rds")
+```
+
+```{r}
+summary((lm(log1p(tree_complexity)~TF, data=hp)))$adj.r.squared
+```
+
+Most of the variance in model complexity is explained by TFs, as opposed to the different models within a TF
+
+```{r}
+hp <- hp[which(hp$model=="full_model").]
+anno <- readRDS("TF_annotation.rds")
+ag <- aggregate(hp[,grep("learning|lambda|num_|min_gain|_fraction|sum_|complexity", colnames(hp))], by=hp[,"TF",drop=FALSE], FUN=mean)
+m <- merge(anno, ag, by="TF")
+
+m$sqrtComplexity <- sqrt(m$tree_complexity)
+m$sqrtRegularization <- sqrt(m$lambda_l1+m$lambda_l2)
+
+cor.test(m$sqrtComplexity, m$meanFinalAUPRC)
+cor.test(m$sqrtComplexity, m$sqrtRegularization)
+```
+
+Complexity is correlated to regularization, as well as to the final AUPRC (regularization is not)
+
+```{r}
+doSEMplot(m, vars=c("sqrtComplexity", "sqrtRegularization"))
+doSEMplot(m, group.by = "ChromatinOpeningType", vars=c("sqrtComplexity", "sqrtRegularization"))
+```
+

@@ -1,0 +1,255 @@
+---
+title: "Compilation of the performance data"
+output: html_document
+---
+
+```{r}
+suppressPackageStartupMessages({
+  library(ggplot2)
+  library(lme4)
+  library(cowplot)
+  library(patchwork)
+  library(SummarizedExperiment)
+  library(data.table)
+  library(ggsignif)
+  library(MultiAssayExperiment)
+})
+setDTthreads(4)
+```
+
+```{r}
+atac <- readRDS("../05_data_TFBApp/atacNormedMat2.rds")
+atacSum <- data.frame(row.names=names(atac$sum), context_label=colnames(atac), sum=atac$sum)
+atac <- readRDS("../05_data_TFBApp/atac_pairwiseDistances.rds")
+```
+
+```{r}
+lf <- list.files("../data/predictions", pattern="^performance_.+tsv$", recursive=TRUE, full=TRUE)
+names(lf) <- basename(dirname(lf))
+
+getCVperf <- function(p, warn=FALSE){
+  tryCatch({
+    p <- as.data.table(p)
+    p1 <- p[which(p$submodel=="pred_stacked" & !grepl("training context|final",p$set)),]
+    p2 <- p[which(p$submodel=="tfFeat_cScore" & !grepl("training context|final",p$set)),]
+    
+    idVars <- c("context", "holdout_set", "trainset", 
+                "set", "model", "computed_on", "context_label")
+    setnames(p2, "auc_pr_mod", "auc_pr_mod_cscore")
+    p <- merge(p1, p2[,c(idVars, "auc_pr_mod_cscore"), with=FALSE],
+               by=idVars)
+    p <- as.data.frame(p)
+    trainContexts <- strsplit(as.character(p$trainset),".",fixed=TRUE)
+    ds <- mapply(train=trainContexts, eval=p$context_label, SIMPLIFY=FALSE, \(train, eval){
+      if(!all(c(train,as.character(eval)) %in% colnames(atac))) return(NA_real_)
+      atac[train, as.character(eval)]
+    })
+    ds <- NumericList(ds)
+    p$dist_to_closest_train <- min(ds)
+    p$dist_mean_train <- mean(ds)
+    p$nTrainContexts <- lengths(trainContexts)
+    p$trainContexts <- paste(unique(unlist(trainContexts)), collapse=".")
+    p <- p[,c("auc_pr_mod", "dist_to_closest_train", "dist_mean_train", "context_label", "set","pos_frac",
+              "nTrainContexts", "trainContexts", "run_version", "submodel", 
+              "auc_pr_mod_cscore")]
+    p
+  }, error=function(e){ if(warn) warning(e); NULL })
+}
+
+getFinalPerf <- function(p, warn=FALSE){
+  tryCatch({
+    p <- p[which(p$set=="final-model: validation chromosomes"),]
+    pC <- p[which(p$submodel=="tfFeat_cScore"),]
+    p <- p[which(p$submodel=="pred_stacked"),]
+    m <- merge(p, pC[,c("context_label", "trainset", "auc_pr_mod")], by=c("context_label", "trainset"))
+    data.frame(context=m$context_label, pos_frac=m$pos_frac, AUPRC=m$auc_pr_mod.x, Cscore.AUPRC=m$auc_pr_mod.y)
+  }, error=function(e){ if(warn) warning(e); NULL })
+}
+getTrainVsHOchr <- function(p, warn=FALSE){
+  tryCatch({
+    p1 <- as.data.frame(p[which(p$submodel=="pred_stacked" & p$set=="cv-model: training context"),])
+    p2 <- as.data.frame(p[which(p$submodel=="pred_stacked" & p$set=="cv-model: validation chromosomes"),])
+    fields <- c("context_label","trainset","pos_frac","auc_pr_mod")
+    m <- merge(p1[,fields], p2[,fields], by=fields[1:2], suffix=c(".trainChr",".valChr"))
+    m$trainset <- as.character(m$trainset)
+    m
+  }, error=function(e){ if(warn) warning(e); NULL })
+}
+
+
+perf <- lapply(setNames(names(lf),names(lf)), \(x){
+  p <- tryCatch(fread(lf[[x]]), error=\(e){ NULL })
+  if(is.null(p))  return(list(CV=NULL, final=NULL, overfitting=NULL))
+  else{
+    v <-  tryCatch(fread(file.path(dirname(lf[[x]]), "version.tsv")),
+                   error=\(e){ NULL })
+    if(!is.null(v)){
+      p$run_version <- v$run_version}
+    else{
+      p$run_version <- NA
+    }
+    p <- as.data.frame(p)
+    return(list(CV=getCVperf(p), final=getFinalPerf(p), overfitting=getTrainVsHOchr(p)))
+  }
+})
+
+perfCV <- lapply(perf, \(x) x$CV)
+perfFinal <- lapply(perf, \(x) x$final)
+perfFinal <- dplyr::bind_rows(perfFinal[!sapply(perfFinal, is.null)], .id="TF")
+perfTrain <- lapply(perf, \(x) x$overfitting)
+perfTrain <- perfTrain[which(sapply(perfTrain, \(x) !is.null(x) && nrow(x)>0))]
+perfTrain <- dplyr::bind_rows(perfTrain, .id="TF")
+perf <- dplyr::bind_rows(perfCV[!sapply(perfCV, is.null)], .id="TF")
+perf$isHoldout <- grepl("context", perf$set)
+perf$atac_sum <- atacSum[as.character(perf$context_label), "sum"]
+perf$sqrtProp <- sqrt(perf$pos_frac)
+perf$logAtac <- log2(perf$atac_sum)
+perf$asinAUC <- asin(sqrt(perf$auc_pr_mod))
+
+mod <- MASS::rlm(asinAUC~isHoldout*sqrt(pos_frac), data=as.data.frame(perf))
+perf$resid.asinAUC <- perf$asinAUC - predict(mod)
+```
+
+
+```{r, fig.width=10, fig.height=6}
+m <- merge(perf[which(perf$isHoldout),],perf[which(!perf$isHoldout),],
+           by=setdiff(colnames(perf), c("isHoldout", "set", "auc_pr_mod",
+                                        "asinAUC","resid.asinAUC",
+                                        "dist_to_closest_train",
+                                        "dist_mean_train","sqrtProp",
+                                        "pos_frac", 
+                                        "auc_pr_mod_cscore")), suffix=c(".test",".train"))
+m$dist_to_closest_train.train <- NULL
+m$pos_frac.diff <- (m$pos_frac.test-m$pos_frac.train)/m$pos_frac.train
+m$asinAUCdiff <- (m$asinAUC.test-m$asinAUC.train)
+m$relAsinAUCdiff <- (m$asinAUC.test-m$asinAUC.train)/pmax(0.05,(m$asinAUC.test+m$asinAUC.train)/2)
+m$nC2 <- factor(m$nTrainContexts)
+levels(m$nC2) <- c("2","3",rep("4+", length(levels(m$nC2))-2))
+m$trainPositives <- 3.8e6*m$nTrainContexts*m$pos_frac.train
+```
+
+
+```{r}
+# see https://icml.cc/2012/papers/349.pdf for normalization to min possible AUPRC
+# m$minTestAUC <- 1 + ((1-m$pos_frac.test)*log(1-m$pos_frac.test))/m$pos_frac.test
+# m$AUCNPR <- (m$auc_pr_mod.test-m$minTestAUC)/(1-m$minTestAUC)
+m$enrichment.test <- m$auc_pr_mod.test/m$pos_frac.test
+m$enrichment.train <- m$auc_pr_mod.train/m$pos_frac.train
+```
+
+
+```{r}
+anno <- readRDS("TF_annotation.rds")
+ag <- aggregate(perfTrain[,4:7], perfTrain[,1,drop=FALSE], FUN=mean)
+row.names(ag) <- ag$TF
+anno$trainAUC.trainChr <- ag[anno$TF, "auc_pr_mod.trainChr"]
+anno$trainAUC.valChr <- ag[anno$TF, "auc_pr_mod.valChr"]
+```
+
+
+```{r, frac shared peaks}
+mae1 <- readRDS("../data/04_maeAll_conFeat_sub.rds")
+cols <- lapply(experiments(mae1), function(n) {
+        colnames(n)[colnames(n) %in% unique(subset(sampleMap(mae1), 
+             !isTesting)$colname)]})
+mae1 <- subsetByColumn(mae1, cols)
+
+mae2 <- readRDS("../data/05_maeAll_conFeat_sub.rds")
+cols <- lapply(experiments(mae2), function(n) {
+        colnames(n)[colnames(n) %in% unique(subset(sampleMap(mae2), 
+             !isTesting)$colname)]})
+mae2 <- subsetByColumn(mae2, cols)
+
+m <- as.data.table(m)
+m[,context_label:=as.character(context_label)]
+m <- subset(m, !is.na(run_version))
+
+propDts <- list()
+unCombs <- unique(m, by=c("context_label", "TF"))
+for(i in 1:nrow(unCombs)){
+ tf <- unCombs[i,]$TF
+ print(i)
+ holdOutContext <- unCombs[i,]$context_label
+ trainContext <- unlist(tstrsplit(unCombs[i,]$trainContexts, split=".", fixed=TRUE))
+ trainContext <- setdiff(trainContext, holdOutContext)
+ holdOutComb <- paste(holdOutContext, tf, sep="_")
+ 
+ trainCombs <- paste(trainContext, tf, sep="_")
+ # TODO: double check this again
+ #trainCombs <- intersect(colnames(assays(mae[["ChIP"]])$peaks), trainCombs)
+ nTrainCombs <- length(trainCombs)
+ if(unCombs[i,]$run_version=="1.0.2"){
+   maeIt <- mae2
+ }else{
+   maeIt <- mae1
+ }
+ trainPeaks <- assays(maeIt[["ChIP"]])$peaks[,trainCombs, drop=FALSE]
+ trainPeaks <- TFBlearner:::.convertToMatrix(trainPeaks)
+ trainPeaks@x <- pmax(trainPeaks@x, 0) # drop peak flank overlaps
+ trainPeaks <- Matrix::drop0(trainPeaks)
+ trainPeaks <- as(trainPeaks, "TsparseMatrix")
+ nTotalPeaksTrain <- length(trainPeaks@i)
+ 
+ holdOutPeaks <- assays(maeIt[["ChIP"]])$peaks[,holdOutComb, drop=FALSE]
+ holdOutPeaks <- TFBlearner:::.convertToMatrix(holdOutPeaks)
+ holdOutPeaks@x <- pmax(holdOutPeaks@x, 0) # drop peak flank overlaps
+ holdOutPeaks <- Matrix::drop0(holdOutPeaks)
+ holdOutPeaks <- as(holdOutPeaks, "TsparseMatrix")
+
+ nSharedPeaks <- length(intersect(holdOutPeaks@i, trainPeaks@i))
+ nTotalPeaks <- length(holdOutPeaks@i)
+ propDts[[holdOutComb]] <- data.table(n_shared_peaks=nSharedPeaks,
+                                      n_total_peaks_test=nTotalPeaks,
+                                      n_total_peaks_train=nTotalPeaksTrain,
+                                      frac_shared_peaks_train=nSharedPeaks/nTotalPeaksTrain,
+                                      frac_shared_peaks_test=nSharedPeaks/nTotalPeaks, 
+                                      n_train_contexts=nTrainCombs)
+}
+propDt <- rbindlist(propDts, idcol="holdout_comb")
+propDt[,c("context", "tf"):=tstrsplit(holdout_comb, split="_")]
+m <- merge(m, propDt, 
+           by.x=c("TF", "context_label"),
+           by.y=c("tf", "context"), 
+           all.x=TRUE, 
+           all.y=FALSE)
+m[,n_diff_peaks:=n_total_peaks_train-n_shared_peaks]
+m[,n_unseen_peaks:=n_total_peaks_test-n_shared_peaks]
+```
+
+
+Median fold-enrichment of `r 2^median(m$log2Enrichment.test)`
+Residual asinAUCdiff ~ asinAUCtrain + sqrt(dist) -> proxy for generalizability
+
+```{r}
+mTf <- m[,lapply(.SD, function(x) if(is.numeric(x)) mean(x) else unique(x)), 
+          by=c("TF", "context_label"), 
+         .SDcols=setdiff(colnames(m),c("TF", "context_label"))]
+w <- which(mTf$enrichment.train>5)
+mod <- lm(log2(enrichment.test/enrichment.train)~sqrt(frac_shared_peaks_test)+
+                                                 nTrainContexts+
+                                                 sqrt(pos_frac.test)+
+                                                 log2(enrichment.train), 
+          ,data=mTf[w,])
+co <- coef(summary(mod))
+mTf$co_frac_shared <- co[2,1]
+mTf$in_frac_shared <- co[1,1]
+mTf$log2enrDiff <- log2(mTf$enrichment.test/mTf$enrichment.train)
+dpv <- paste0("p=",format(co[grep("dist",row.names(co)), 4], digit=1), " ")
+mTf$log2enrDiff.pred <- predict(mod, newdata = mTf)
+mTf$log2enrDiff.resid <- mTf$log2enrDiff-predict(mod, newdata = mTf)
+```
+
+```{r}
+perfFinal <- as.data.table(perfFinal)
+perfFinal[,context:=as.character(context)]
+perfTrain <- as.data.table(perfTrain)
+perfTrain[,context:=as.character(context_label)]
+save(perfFinal, perf, perfTrain, m, mTf, file="performances.RData")
+
+ag <- aggregate(perfFinal[,-1:-2], perfFinal[,1,drop=FALSE], FUN=mean)
+row.names(ag) <- ag$TF
+anno$auc_Cscore <- ag[anno$TF, "Cscore.AUPRC"]
+
+saveRDS(anno[,!duplicated(colnames(anno))], file="TF_annotation.rds")
+```
+

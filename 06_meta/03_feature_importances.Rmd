@@ -1,0 +1,105 @@
+---
+title: "Meta-analysis of the feature importances"
+output: html_document
+date: "2025-08-28"
+---
+
+```{r}
+suppressPackageStartupMessages({
+  library(ggplot2)
+  library(data.table)
+  library(ComplexHeatmap)
+  library(SummarizedExperiment)
+  library(sechm)
+})
+source("../utils/load_all.R", chdir=TRUE)
+```
+
+# Compilation of the feature importance data
+
+```{r}
+anno <- readRDS("TF_annotation.rds")
+
+featGroups <- read.csv("tfbs_feature_group_updated.csv", row.names = 1)
+x <- gsub("_[0-9]+$","",gsub("_normed$|_normedMaxATAC$","",row.names(featGroups)))
+featGroups <- featGroups[!duplicated(x),]
+row.names(featGroups) <- x[!duplicated(x)]
+```
+
+```{r}
+lf <- list.files("../data/predictions", pattern="^featImp_.+tsv$", recursive=TRUE, full=TRUE)
+names(lf) <- basename(dirname(lf))
+metrics <- c("Gain", "Cover", "Frequency", "meanAbsShap","meanPosShap")
+
+res <- lapply(lf, \(x){
+  tryCatch({
+    e <- as.data.frame(fread(x))
+    fn <- as.data.frame(fread(paste0(dirname(x), "/featureNameMap.tsv")))
+    fn$target <- sapply(strsplit(gsub("_dinucMotif|_normed|_dimerMotif","",fn$explicit_feature_name), "_"), \(x) rev(x)[1])
+    fn <- setNames(gsub(":HUMAN.+","",fn$target), fn$feature_name)
+    e <- e[which(e$set=="final-model: validation chromosomes"),]
+    x <- gsub("_[0-9]+$","",gsub("_normed$|_normedMaxATAC$","",e$Feature))
+    e$class <- featGroups[x,"Larger.group"]
+    e$target <- fn[e$Feature]
+    e$target[is.na(e$target)] <- "N/A"
+    e <- aggregate(e[,c(metrics,"pos_frac")], by=e[,c("Feature", "group", "class","target")], FUN=mean)
+    e$target[e$target=="N/A"] <- NA_character_
+    e
+  }, error=\(e){ warning(e); NULL})
+})
+table(sapply(res, is.null))
+res <- res[!sapply(res, is.null)]
+
+agfn <- function(res, value="meanAbsShap", by="group"){
+  ag <- lapply(res, \(x) rowsum(x[[value]], x[[by]], na.rm=TRUE)[,1])
+  groups <- unique(unlist(lapply(ag, names)))
+  o <- sapply(ag, \(x){
+      x <- x[groups]
+      x[is.na(x)] <- 0
+      setNames(x, groups)
+    })
+  if(by=="class") return(o)
+  rbind(o, 
+    TFmotifMatch=sapply(res, \(x) mean(x[[value]][which(x$Feature=="tfFeat_motifMatch_ctcfMotif_1")])),
+    otherMotifs=sapply(res, \(x) sum(x[[value]][grep("motifMatch_tfCofactor|motifMatch_selectedMotif",x$Feature)]))
+  )
+}
+
+anno <- anno[names(res),]
+row.names(anno) <- names(res)
+anno$`Binding mode` <- factor(anno$`Binding mode`, sort(unique(anno$`Binding mode`))[1:2], c("Monomer or\nhomomultimer", "Obligate\nheteromer"))
+
+
+ag1 <- SummarizedExperiment(assays=lapply(setNames(metrics, metrics), \(x) agfn(res, x)), colData=anno)
+
+meta <- SummarizedExperiment(lapply(assays(ag1)[4:5], \(x){
+  cs <- colSums(x)
+  t(cbind(TFmotif=100*x["TFmotifMatch",]/cs, 
+          Cofactors=100*colSums(x[grep("otherMotifs|patternTf|ctcfBind|coBind", row.names(x)),])/cs,
+          ATAC=100*colSums(x[grep("overlaps|nserts|chi2DevProfile",row.names(x)),])/cs,
+          Sequence=100*colSums(x[grep("_Embed_|motifMatch|MotifCount", row.names(x)),])/cs))
+}), colData=colData(ag1))
+
+ag2 <- SummarizedExperiment(assays=list(meanAbsShap=agfn(res, by="class"), meanPosShap=agfn(res, "meanPosShap", by="class")), colData=anno)
+
+cofactors <- dplyr::bind_rows(lapply(res, \(x){
+  cs <- colSums(x[,c("meanAbsShap", "meanPosShap")])
+  x <- x[!is.na(x$target),]
+  x <- aggregate(x[,c("meanAbsShap", "meanPosShap")], by=list(cofactor=x$target), FUN=sum)
+  x[,2:3] <- t(t(x[,2:3])/cs)
+  as.data.frame(x)
+}), .id="TF")
+```
+
+```{r}
+assay(ag1, "normPosShap2") <- 100*t(t(assay(ag1,"meanPosShap"))/colSums(assay(ag1,"meanPosShap")))
+assay(ag2, "normPosShap2") <- 100*t(t(assay(ag2,"meanPosShap"))/colSums(assay(ag2,"meanPosShap")))
+assay(ag1, "normAbsShap2") <- 100*t(t(assay(ag1,"meanAbsShap"))/colSums(assay(ag1,"meanAbsShap")))
+assay(ag2, "normAbsShap2") <- 100*t(t(assay(ag2,"meanAbsShap"))/colSums(assay(ag2,"meanAbsShap")))
+
+saveRDS(ag1, file="shap_by_featGroup.SE.rds")
+saveRDS(ag2, file="shap_by_featClass.SE.rds")
+saveRDS(meta, file="shap_by_meta.SE.rds")
+saveRDS(cofactors, file="shap_cofactors.rds")
+```
+

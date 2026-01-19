@@ -1,0 +1,245 @@
+---
+title: "Compilation of various TF metadata"
+output: html_document
+date: "2025-08-28"
+---
+
+```{r}
+suppressPackageStartupMessages({
+  library(data.table)
+  library(Matrix)
+  library(EnsDb.Hsapiens.v86)
+  library(MultiAssayExperiment)
+})
+```
+
+
+```{r}
+#download.file("https://hocomoco13.autosome.org/final_bundle/hocomoco13/tf_masterlist.tsv", "hocomoco13_tfs.tsv")
+h1 <- fread("hocomoco13_tfs.tsv")
+h1 <- as.data.frame(h1[!grepl("MOUSE",h1$`curated:uniprot_id`),])
+row.names(h1) <- h1$`auto:gene_symbol`
+h <- h1[,c(2:6)]
+colnames(h) <- gsub("tfclass:","",colnames(h),fixed=TRUE)
+```
+
+```{r}
+#download.file("https://ftp.ebi.ac.uk/pub/databases/Pfam/mappings/pdb_pfam_mapping.txt", "pdb_pfam_mapping.txt")
+pfup <- fread("pdb_pfam_mapping.txt")
+h$domains <- lapply(split(pfup$PFAM_ACCESSION, pfup$UNIPROT_ACCESSION)[h$`curated:uniprot_ac`], unique)
+
+clans <- fread("https://ftp.ebi.ac.uk/pub/databases/Pfam/current_release/Pfam-A.clans.tsv.gz", header = FALSE)
+clans <- as.data.frame(clans, row.names = clans$V1)
+h$domainClans <- lapply(relist(clans[unlist(h$domains), "V3"], h$domains), \(x){
+                          unique(x[which(x!="")])
+                        })
+```
+```{r}
+e <- as.data.frame(readxl::read_xlsx("Lambert2018_Supp_TFs.xlsx", sheet = 2, skip=1, guess_max = 3000))
+row.names(e) <- e$Name
+e <- e[e[,4]=="Yes",]
+e$isLambertTf <- TRUE
+e <- e[,c("DBD", "Binding mode", "isLambertTf")]
+m <- merge(e,h,by="row.names",all=TRUE)
+```
+
+
+```{r}
+#download.file("https://ars.els-cdn.com/content/image/1-s2.0-S1097276521009576-mmc8.xlsx", "SotoMolCell2022.xlsx")
+e <- readxl::read_excel("SotoMolCell2022.xlsx", sheet = 5)
+m$SotoFamily <- setNames(e$`TF Family`, e$`TF name`)[m$Row.names]
+effd <- sapply(split(e$`Domain type`, e$`TF name`), \(x){
+  if(any(grepl("Bif",x))) return("AD/RD")
+  paste(sort(unique(x)), collapse="/")
+})
+m$effector <- effd[m$Row.names]
+```
+
+```{r}
+e <- as.data.frame(readxl::read_excel("/mnt/nvme1/analysis/data/meta_data/tf_class_pred_ehsani_2016.xls"))
+row.names(e) <- e$Symbol
+m <- merge(m, e[,6:16], by.x="Row.names", by.y="row.names", all.x=TRUE)
+```
+
+```{r}
+# downloaded from https://static-content.springer.com/esm/art%3A10.1038%2Fnbt.2798/MediaObjects/41587_2014_BFnbt2798_MOESM2_ESM.pdf 
+# then converted to csv
+e <- fread("SherwoodNatBio2014_TF_indices.csv")
+e <- e[which(e$TF != ""),]
+ag <- aggregate(e[,4:7], by=list(TF=toupper(e$TF)), FUN=mean)
+m <- merge(m, ag, by.x="Row.names", by.y="TF", all.x=TRUE)
+m$meanOpeningIndex <- (m$`Chromatin Opening index` + m$`K562 Opening index`)/2
+```
+
+```{r}
+motifs <- readRDS("../00_data_preparation/03_motif_aggregation/AllMotifs_onePerGene.rds")
+m$motifIC <- sapply(motifs, \(x) x@icscore)[as.character(m[,1])]
+m$motifLength <- sapply(motifs, \(x) ncol(x@motif))[as.character(m[,1])]
+```
+
+
+```{r}
+m$nDBD <- lengths(strsplit(m$`DNA_binding Domains`,";"))
+row.names(m) <- m[,1]
+m <- m[,-1]
+saveRDS(m, file="TF_annotation.rds")
+```
+
+# Adding distances to TSS
+
+```{r}
+mae <- readRDS("../02_preprocessing/maeAllHdf5.rds")
+chip <- experiments(mae)$ChIP
+proms <- promoters(EnsDb.Hsapiens.v86, upstream = 1L, downstream = 0L)
+seqlevels(proms) <- paste0("chr",seqlevels(proms))
+d <- distanceToNearest(rowRanges(chip), proms)
+d <- mcols(d)$distance
+saveRDS(d, file="PRE_distance_to_TSS.rds")
+ch <- as(assay(chip), "sparseMatrix")
+ch <- as(ch, "TsparseMatrix")
+w <- which(ch@x>0.1)
+dt <- data.table(dist=d[ch@i[w]+1L], TF=factor(chip$tfName)[ch@j[w]+1L], context=factor(chip$context)[ch@j[w]+1L])
+dt2 <- dt[, .(n=length(dist), mean=as.numeric(mean(dist)), median=as.numeric(median(dist))), by = .(TF, context)]
+saveRDS(dt2, file="TFs_distance_to_TSS.rds")
+ag <- aggregate(as.data.frame(dt2)[,c("mean","median")], by=list(TF=dt2$TF), FUN=mean)
+row.names(ag) <- ag$TF
+m$meanDistToTSS <- ag[row.names(m), "mean"]
+m$medianDistToTSS <- ag[row.names(m), "median"]
+saveRDS(m, file="TF_annotation.rds")
+```
+
+
+# Adding performance data
+
+```{r}
+m <- readRDS("TF_annotation.rds")
+lf <- list.files("../data/predictions", pattern="^performance_.+tsv$", recursive=TRUE, full=TRUE)
+names(lf) <- basename(dirname(lf))
+perf <- lapply(names(lf), \(x){
+  p <- try(fread(lf[[x]]), silent=TRUE)
+  if(is(p, "try-error")) return(NULL)
+  p <- p[which(p$submodel=="pred_stacked"),]
+  d <- data.frame(tf=x, nContexts=length(unique(p$context)), pos_frac=mean(p$pos_frac),
+                  meanFinalAUPRC=mean(p$auc_pr_mod[which(p$set=="final-model: validation chromosomes")]),
+                  meanCvAUPRC=mean(p$auc_pr_mod[which(p$set=="cv-model: validation context")]),
+                  minCvAUPRC=min(p$auc_pr_mod[which(p$set=="cv-model: validation context")]))
+})
+perf <- dplyr::bind_rows(perf[!sapply(perf, is.null)])
+
+anno <- merge(m, perf, by.x="row.names", by.y="tf", all=TRUE)
+# anno$generalizability <- pmin(1,1 + (anno$meanCvAUPRC-anno$meanFinalAUPRC)/anno$meanFinalAUPRC)
+# anno$generalizability[which(anno$meanFinalAUPRC<0.05)] <- NA_real_
+anno$DBD[which(anno$DBD=="Unknown")] <- NA
+anno$`Binding mode`[which(anno$`Binding mode`=="Unknown")] <- NA
+colnames(anno) <- gsub("Chromatin Opening Type", "ChromatinOpeningType", colnames(anno))
+anno$ChromatinOpeningType <- tolower(anno$ChromatinOpeningType)
+row.names(anno) <- anno[,1]
+anno <- anno[,-1]
+```
+
+```{r}
+anno$customClass <- as.character(anno$superclass)
+anno$customClass[grep("alpha-",anno$customClass)] <- "Alpha-helical"
+anno$customClass[grep("beta-",anno$customClass)] <- "Beta-structures"
+anno$customClass[grep("Zinc", anno$superclass)] <- "Other zinc fingers"
+anno$customClass[grep("Nuclear receptors", anno$class)] <- "Nuclear receptors"
+anno$customClass[grep("C2H2 zinc finger", anno$class)] <- "C2H2 zinc fingers"
+anno$customClass[grep("Helix-turn-helix", anno$superclass)] <- "Other HTH"
+anno$customClass[grep("Homeo", anno$class)] <- "Homeo domain"
+anno$customClass[grep("Fork head", anno$class)] <- "Fork head/winged helix"
+anno$customClass[grep("Tryptophan", anno$class)] <- "Tryptophan cluster"
+w <- grep("Basic domains", anno$superclass)
+anno$customClass[w] <- anno$class[w]
+anno$customClass[grep("undefined", anno$customClass)] <- NA_character_
+anno$customClass[which(is.na(anno$superclass) & anno$SotoFamily=="C2H2 ZF")] <- "C2H2 zinc fingers"
+anno$customClass[which(anno$customClass=="Basic helix-loop-helix factors (bHLH)")] <- "bHLH"
+anno$customClass[which(anno$customClass=="Basic leucine zipper factors (bZIP)")] <- "bZIP"
+anno$customClass <- factor(anno$customClass,unique(anno$customClass[order(anno$superclass)]))
+```
+
+
+```{r}
+anno$TF <- row.names(anno)
+```
+
+```{r, eval=FALSE}
+# PPI-based clustering of the TFs, wasn't used in the end
+b <- readRDS("/reference/Biogrid_5.0.250/human.rds")
+b <- b[which(b$V1 %in% anno$TF | b$V2 %in% anno$TF), ]
+glvls <- union(unique(b$V1), unique(b$V2))
+b$V1 <- factor(b$V1, glvls)
+b$V2 <- factor(b$V2, glvls)
+im <- sparseMatrix(i=as.integer(b$V1), j=as.integer(b$V2), dims=rep(length(glvls),2), dimnames = list(glvls,glvls))
+im <- im | t(im)
+
+yule <- function(x, y=NULL, Q=FALSE){
+  if(is.null(y)) y <- x
+  tx <- t(x)
+  ad <- (y %*% tx) * ((1L - y) %*% (1L - tx))
+  bc <- (y %*% (1L - tx)) * ((1L - y) %*% tx)
+  if(!isTRUE(Q)){
+    ad <- sqrt(ad)
+    bc <- sqrt(bc)
+  }
+  ret <- (ad - bc)/(ad + bc)
+  dimnames(ret) <- NULL
+  ret[is.na(ret)] <- 0
+  ret
+}
+
+im <- im[which(row.names(im) %in% anno$TF), ]
+yd <- yule(im, Q=TRUE)
+yd <- 1-as.matrix(yd)
+yd <- apply(yd, 1, \(x){
+  x[which(x>sort(x)[10] | x>1)] <- 0
+  1/x
+})
+dimnames(yd) <- list(row.names(im), row.names(im))
+g <- igraph::graph_from_adjacency_matrix(yd, mode = "max")
+cl <- igraph::cluster_louvain(g)
+cl <- setNames(cl$membership, row.names(im))
+
+anno$PPI.cluster <- cl[anno$TF]
+```
+
+```{r}
+# from https://doi.org/10.1038/s41467-021-21534-4
+# download.file("https://static-content.springer.com/esm/art%3A10.1038%2Fs41467-021-21534-4/MediaObjects/41467_2021_21534_MOESM6_ESM.xlsx", "DOliveiraAlbanus2021_CIM.xlsx")
+e <- as.data.frame(readxl::read_excel("DOliveiraAlbanus2021_CIM.xlsx", sheet=1))
+ag <- aggregate(e[,-1], by=list(gene=gsub("_[0-9]$","",e[,1])), FUN=mean)
+row.names(ag) <- ag[,1]
+mVICE <- rowMeans(ag[,-1])
+anno$nVICE <- mVICE[as.character(anno$TF)]
+
+```
+
+Disordered domains:
+
+```{r}
+dis <- read.delim("mobidb_hs_disorder_curatedMerged_2025-12-04T14-35-32.tsv", header = FALSE)
+colnames(dis) <- c("id", "source", "dis.residues", "pc.disorder", "tot.dis.residues", "length")
+dis <- dis[which(dis$source=="curated-disorder-merge"),]
+row.names(dis) <- dis$id
+
+annot <- proteins(EnsDb.Hsapiens.v86, columns=c("gene_name","uniprot_id"), filter=GeneNameFilter(anno$TF[which(is.na(anno$`curated:uniprot_ac`))]))
+m <- merge(dis, annot, by.x="id", by.y="uniprot_id", all=TRUE)
+m <- aggregate(m[,c("pc.disorder","tot.dis.residues")], by=list(gene=m$gene_name), FUN=\(x){ x <- x[!is.na(x)]; if(length(x)==0) return(0); mean(x) })
+row.names(m) <- m$gene
+
+ag <- aggregate(dis[,c("pc.disorder", "tot.dis.residues")], by=list(dis$id), FUN=mean, na.rm=TRUE)
+row.names(ag) <- ag[,1]
+anno$pc.disorder <- ag[anno$`curated:uniprot_ac`, "pc.disorder"]
+anno$tot.dis.residues <- ag[anno$`curated:uniprot_ac`, "tot.dis.residues"]
+w <- which(is.na(anno$`curated:uniprot_ac`) & is.na(anno$pc.disorder))
+anno$pc.disorder[w] <- m[anno$TF[w],"pc.disorder"]
+anno$tot.dis.residues[w] <- m[anno$TF[w],"tot.dis.residues"]
+w <- which(is.na(anno$pc.disorder) & (anno$TF %in% row.names(m) | !is.na(anno$`curated:uniprot_ac`)))
+anno$pc.disorder[w] <- 0
+anno$tot.dis.residues[w] <- 0
+```
+
+```{r}
+saveRDS(anno, file="TF_annotation.rds")
+```
+
+

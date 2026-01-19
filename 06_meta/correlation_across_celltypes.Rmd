@@ -1,0 +1,107 @@
+---
+title: "Correlation across celltypes"
+output: html_document
+date: "2025-11-12"
+---
+
+```{r}
+suppressPackageStartupMessages({
+  library(rhdf5)
+  library(data.table)
+  library(Matrix)
+})
+setDTthreads(4)
+
+lf <- list.files("../data/predictions/", pattern="predictions2\\.h5", full=TRUE, recursive = TRUE)
+names(lf) <- basename(dirname(lf))
+```
+
+
+```{r, eval=FALSE}
+ccs <- lapply(lf, \(x){
+  tryCatch({
+    tmp2 <- t(h5read(x, "predictions"))
+    colnames(tmp2) <- h5read(x, "contexts")[2,]
+    tmp2 <- asin(sqrt(tmp2/1000))
+    #cat("+")
+    cor(tmp2)
+  }, error=function(e){
+    #cat("x")
+    NULL
+  })
+})
+isOk <- !sapply(ccs, is.null)
+table(success=isOk)
+ccs <- ccs[which(isOk)]
+saveRDS(ccs, file="correlation_across_celltypes.rds")
+```
+
+
+```{r}
+# takes a sparse matrix as input, then computes the jaccard index between the 
+# top N elements of pairs of columns
+mat2jacc <- function(mat, N=500){
+  tmp <- as(mat, "TsparseMatrix")
+  d <- data.table(i=tmp@i, celltype=tmp@j, value=tmp@x)
+  rm(tmp)
+  dtop <- d[d[, .I[order(-value)][seq_len(min(.N, N))], by=celltype]$V1, 1:2]
+  rm(d)
+  gc()
+  indDt <- merge(dtop, dtop, by=c("i"), allow.cartesian=TRUE)
+  overlaps <- as.matrix(table(indDt$celltype.x, indDt$celltype.y))
+  overlaps <- overlaps/(N*2-overlaps)
+  colnames(overlaps) <- row.names(overlaps) <- colnames(mat)
+  overlaps
+}
+
+# # slower
+# mat2jacc2 <- function(mat, N=500){
+#   ov <- tcrossprod(MatrixGenerics::colRanks(-mat)<=500)
+#   ov/(2*N-ov)
+# }
+
+cj <- lapply(lf, \(x){
+  tryCatch({
+    tmp2 <- t(h5read(x, "predictions"))
+    colnames(tmp2) <- h5read(x, "contexts")[2,]
+    mat2jacc(tmp2)
+    #cat("+")
+  }, error=function(e){
+    #cat("x")
+    NULL
+  })
+})
+isOk <- !sapply(cj, is.null)
+table(success=isOk)
+cj <- cj[which(isOk)]
+saveRDS(cj, file="correlation_across_celltypes_top500jaccard.rds")
+```
+
+
+```{r, fig.width=10, fig.height=6}
+suppressPackageStartupMessages({
+  library(ggplot2)
+  library(patchwork)
+})
+
+ccs <- readRDS("correlation_across_celltypes.rds")
+ccs2 <- lapply(ccs, \(x) x[lower.tri(x)])
+ccm <- sapply(ccs2, mean)
+anno <- readRDS("TF_annotation.rds")[,-1]
+anno$cor <- ccm[anno$TF]
+anno$nContexts2 <- pmax(1,pmin(anno$nContexts,4))
+
+ccs <- readRDS("correlation_across_celltypes_top500jaccard.rds")
+ccs2 <- lapply(ccs, \(x) x[lower.tri(x)])
+ccm <- sapply(ccs2, mean)
+anno$jac <- ccm[anno$TF]
+anno$meanAss <- (anno$jac + anno$cor)/2
+anno$meanZ <- (scale(anno$jac)+scale(anno$cor))/2
+
+d <- reshape2:::melt.data.frame(anno, c("customClass","TF","ChromatinOpeningType","nContexts2"), measure.vars = c("cor","jac","meanAss","meanZ"))
+levels(d$variable) <- c("Pearson", "Jaccard", "mean","meanZ")
+theme_set(theme_bw())
+(ggplot(d, aes(value, customClass)) + stat_summary(na.rm = TRUE) + facet_wrap(~variable, scale="free_x", nrow=1)) /
+  (ggplot(d, aes(value, ChromatinOpeningType)) + stat_summary(na.rm = TRUE) + facet_wrap(~variable, scale="free_x", nrow=1))
+```
+

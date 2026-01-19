@@ -1,0 +1,92 @@
+---
+title: "Motif vs binding"
+output: html_document
+date: "2025-11-03"
+---
+
+```{r setup}
+suppressPackageStartupMessages({
+  library(HDF5Array)
+  library(universalmotif)
+  library(MultiAssayExperiment)
+  library(ggplot2)
+  library(Matrix)
+  library(BiocParallel)
+})
+```
+
+```{r}
+mae <- readRDS("../data/01_maeAll.rds")
+chip <- experiments(mae)$ChIP
+motifs <- readRDS("/mnt/germain/plger/tfbs_prep_clean/03_motif_aggregation/AllMotifs_onePerGene.rds")
+matches <- experiments(mae)$Motifs
+motifs <- motifs[intersect(names(motifs),intersect(colnames(matches),as.character(chip$tfName)))]
+names(ths) <- ths <- c(1e-3, 5e-5, 1e-6)
+```
+
+
+```{r}
+bp <- MulticoreParam(10, progress=FALSE)
+
+res <- bplapply(setNames(seq_along(motifs), names(motifs)), BPPARAM=bp, \(i){
+  matches1 <- assay(matches)[,names(motifs)[i]]
+  p <- motif_pvalue(motifs[[i]], score=matches1/10000)
+  lapply( ths, \(th){ which(p<=th) })
+})
+
+ml <- list()
+for(f in seq_along(ths)){
+  print(ths[f])
+  m1 <- dplyr::bind_rows(lapply(seq_along(res), \(i){
+    x <- res[[i]][[f]]
+    data.frame(tf=rep(i, length(x)), region=x)
+  }))
+  m1 <- sparseMatrix(m1$region, m1$tf, dims = c(nrow(matches), length(motifs)))
+  colnames(m1) <- names(motifs)
+  ml[[names(ths)[f]]] <- m1
+}
+ml <- SummarizedExperiment(ml)
+ml$motifIC <- sapply(motifs, \(x) x@icscore)
+ml$motifLength <- sapply(motifs, \(x) ncol(x@motif))
+saveRDS(ml, file="motifMatches_binary.rds")
+```
+
+```{r}
+assay(chip) <- as(assay(chip), "sparseMatrix")
+chip2 <- sapply(setNames(names(motifs),names(motifs)), \(x){
+  matrixStats::rowMaxs(as.matrix(assay(chip)[,which(chip$tfName==x),drop=FALSE]))
+})
+chip2 <- as(chip2, "sparseMatrix")
+rm(chip)
+gc()
+ch.th <- c("any"=0,"25"=0.25,"50"=0.5)
+res <- dplyr::bind_rows(lapply(ch.th, \(cth){
+  print(cth)
+  chip3 <- chip2>cth
+  dplyr::bind_rows(bplapply(setNames(assayNames(ml),assayNames(ml)), BPPARAM=bp, \(th){
+    data.frame(tf=colnames(ml),
+               motif=colSums(assay(ml, th)),
+               chip=colSums(chip3),
+               both=colSums(assay(ml, th) & chip3),
+               any=colSums(assay(ml, th) | chip3))
+  }), .id="motifThreshold")
+}), .id="chipThreshold")
+res <- merge(res, as.data.frame(colData(ml)), by.x="tf", by.y="Row.names", all=TRUE)
+rm(chip2)
+gc()
+saveRDS(res, file="motif_chip_overlaps.rds")
+```
+
+```{r}
+res <- readRDS("motif_chip_overlaps.rds")
+res2 <- res[res$chipThreshold==50 & res$motifLength<40,]
+p <- ggplot(res2[order(res2$motifIC),], aes(both/chip, both/motif, colour=pmin(35,motifIC))) +
+  geom_point() + facet_wrap(~motifThreshold) + scale_y_sqrt() + theme_bw() +
+  scale_color_viridis_c(breaks=c(5,35)) + 
+  labs(x="Proportion of peaks (in PREs) that have the motif", color="Motif\nIC",
+       y="Proportion of motif matches (in\nPREs) that are bound")
+p
+#ggExtra::ggMarginal(p)
+```
+
+

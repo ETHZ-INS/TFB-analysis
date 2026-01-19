@@ -1,0 +1,50 @@
+---
+title: "String_db"
+output: html_document
+date: "2025-07-30"
+---
+
+```{r}
+suppressPackageStartupMessages(
+  library(data.table)
+)
+data.table::setDTthreads(4)
+```
+
+
+```{bash, eval=FALSE}
+wget "https://stringdb-downloads.org/download/protein.aliases.v12.0/9606.protein.aliases.v12.0.txt.gz"
+wget "https://stringdb-downloads.org/download/protein.links.detailed.v12.0/9606.protein.links.detailed.v12.0.txt.gz"
+```
+
+
+```{r}
+pi <- as.data.frame(fread("9606.protein.aliases.v12.0.txt.gz"))
+pi <- pi[which(pi$source=="Ensembl_HGNC"),]
+mo <- readRDS("03_motif_aggregation/AllMotifs_onePerGene.rds")
+pi2 <- pi[which(pi$alias %in% names(mo)),]
+row.names(pi2) <- pi2[,1]
+int <- fread("9606.protein.links.detailed.v12.0.txt.gz")
+int <- int[which(int$protein1 %in% row.names(pi2) & int$protein2 %in% row.names(pi2)),]
+int$gene1 <- pi2[int$protein1,"alias"]
+int$gene2 <- pi2[int$protein2,"alias"]
+tt <- table(int$gene1)
+int$n1 <- tt[int$gene1]
+int <- int[,-1:-2]
+saveRDS(int, file="int.rds")
+int2 <- int[which( (int$n1<20 & int$combined_score>200) | int$experimental>0 | int$database>0),]
+tt2 <- table(int2$gene1)
+sp <- split(as.data.frame(int), int$gene1)
+# top 10 experimental interactors + top combined
+topInt <- lapply(sp, \(y){
+  y <- y[order(-y$combined_score),]
+  w <- which(y$combined_score>=500)
+  if(length(w)>=5){
+    y <- y[w,]
+    return(y[head(c(head(which(y$experimental>0 | y$database>0),10), 1:20),30),"gene2"])
+  }
+  y[head(c(head(which(y$experimental>0 | y$database>0),5), 1:10),10),"gene2"]
+})
+saveRDS(topInt, file="topInteractors.rds")
+```
+

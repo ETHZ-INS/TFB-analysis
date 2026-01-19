@@ -1,0 +1,31 @@
+---
+title: "Preparing consensus regions"
+author: "Pierre-Luc Germain"
+output: html_document
+---
+
+```{r}
+suppressPackageStartupMessages({
+  library(GenomicRanges)
+  library(data.table)
+})
+data.table::setDTthreads(3)
+```
+
+```{r}
+dhs <- readRDS("hybrid.custom.hg38.resized.resplit.rds")
+
+lf <- list.files("../chIP_tfbs/raw/ENCODE", recursive = TRUE, full=TRUE)
+gr <- sapply(strsplit(basename(lf),"_|\\."), FUN=function(x) paste(x[3],x[5],sep="_"))
+slf <- split(lf, gr)
+
+op <- sapply(slf, FUN=function(x){
+  b <- unlist(GRangesList(lapply(x, FUN=function(f){
+    e <- data.table::fread(f, drop=4:10, colClasses=c(V1="character", V2="integer", V3="integer"))
+    GRanges(e$V1, IRanges(e$V2, e$V3))
+  })))
+  c(sum(overlapsAny(b, dhs))/length(b), length(reduce(b)))
+})
+d <- data.frame(TF=factor(gsub("_.+","",colnames(op))), nb=op[2,], prop=op[1,])
+saveRDS(d, file="peaks_in_consensusRegions.rds")
+```

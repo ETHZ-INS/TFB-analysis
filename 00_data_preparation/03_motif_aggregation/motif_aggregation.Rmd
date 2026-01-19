@@ -1,0 +1,124 @@
+---
+title: "Motif aggregation"
+output: html_document
+date: "2024-03-05"
+---
+
+The aim here is to get a motif for as many gene as possible, prioritizing higher-quality sources, and avoiding multiple motfs per gene.
+Many motifs will be redundant, and some gene names might not be the canonical ones or even the right species.
+
+```{r}
+suppressPackageStartupMessages({
+  library(universalmotif)
+  library(MotifDb)
+})
+
+e <- readxl::read_xlsx("Lambert2018_Supp_TFs.xlsx", sheet = 2, skip=1, guess_max = 3000)
+tfs <- e$Name[which(e[,4]=="Yes")]
+
+# Priority: GHT > MOBI > HOCOMOCO 12 > other > called on ENCODE peaks > cisTarget
+
+# the Expert_curated_PWMs_Hugheslab from https://codebook.ccbr.utoronto.ca
+ght <- readRDS("codebook_motifs.rds")
+
+mobi <- readRDS("MOBI_universalmotifs.rds")
+# exclude secondary motifs:
+mobi <- mobi[grep("\\.[0-9]", names(mobi), invert=TRUE)]
+
+motifs <- c(ght, mobi[setdiff(names(mobi), names(ght))])
+
+# hocomoco 12
+h12 <- readRDS("H12CORE.motifs.rds")
+
+# get non-redundant motifs from hocomoco 12
+# first extract metadata from names:
+d <- as.data.frame(row.names=names(h12), dplyr::bind_rows(lapply(strsplit(names(h12),"\\."), FUN=function(x){
+  x <- as.data.frame(as.list(x))
+  colnames(x) <- LETTERS[1:4]
+  x
+})))
+d <- d[order(d$A,d$D),] # rank by class
+d <- d[!duplicated(d$A),] # keep only top per TF
+h12 <- h12[row.names(d)]
+names(h12) <- d$A
+for(f in names(h12)) h12[[f]]@name <- f
+
+# keep only h12 motifs that aren't in the previous lists
+motifs <- c(motifs, h12[setdiff(names(h12), names(motifs))])
+
+# motifDb
+
+#' getNonRedundantMotifs
+#'
+#' Fetches best motif per gene from MotifDb
+#'
+#' @param format Output format of the motifs
+#' @param species Species, either "Hsapiens" or "Mmusculus", or "both" (gives
+#'   priority to Hsapiens)
+#' @param priority The data sources to include, in decreasing order of priority.
+#'   priority="core" can be used to retrieve only the core HOCOMOCOv11 motifs.
+#'
+#' @return An object of the specified format
+getNonRedundantMotifs <- function(format=c("PFMatrix","universal","PWMatrix"),
+                                  species=c("Hsapiens","Mmusculus","both"),
+                                  priority=NULL){
+  format <- match.arg(format)
+  if(is.null(priority)){
+    priority <-
+      c("HOCOMOCOv11-core-A", "HOCOMOCOv11-core-B", "HOCOMOCOv11-core-C",
+        "HOCOMOCOv10", "jaspar2018", "JASPAR_CORE", "SwissRegulon", "hPDI",
+        "cisbp_1.02", "HOCOMOCOv11-secondary-A", "HOCOMOCOv11-secondary-B",
+        "HOCOMOCOv11-secondary-C", "HOCOMOCOv11-secondary-D",
+        "jaspar2016", "JASPAR_2014",  "jolma2013", "stamlab", "UniPROBE")
+  }else if(length(priority)==1 && priority %in% c("core","hocomoco-core")){
+    priority <- c("HOCOMOCOv11-core-A", "HOCOMOCOv11-core-B", "HOCOMOCOv11-core-C")
+  }
+  species <- match.arg(species)
+  motifs <- MotifDb::query(MotifDb::MotifDb,
+                           ifelse(species=="both","Hsapiens|Mmusculus",species))
+  m <- mcols(motifs)
+  m <- m[m$dataSource %in% priority,]
+  m$dataSource <- factor(m$dataSource, priority)
+  m$organism <- factor(m$organism,
+                       c(species, setdiff(sort(unique(m$organism)), species)))
+  if(species=="both")  m$geneSymbol <- toupper(m$geneSymbol)
+  m <- m[order(m$geneSymbol, m$organism, as.integer(m$dataSource)),]
+  m <- m[!duplicated(m$geneSymbol) & !is.na(m$geneSymbol),]
+  motifs <- motifs[row.names(m)]
+  if(format=="universal")
+    return(setNames(universalmotif::convert_motifs(motifs), m$geneSymbol))
+  motifs <- switch(format,
+    PFMatrix=universalmotif::convert_motifs(motifs, class="TFBSTools-PFMatrix"),
+    PWMatrix=universalmotif::convert_motifs(motifs, class="TFBSTools-PWMatrix"))
+  motifs <- mapply(mo=motifs, n=m$geneSymbol, FUN=function(mo,n){
+    mo@name <- n
+    mo
+  })
+  names(motifs) <- m$geneSymbol
+  switch(format,
+         PWMatrix=do.call(TFBSTools::PWMatrixList,motifs),
+         PFMatrix=do.call(TFBSTools::PFMatrixList,motifs))
+}
+
+mo <- getNonRedundantMotifs("universal", "both")
+mo <- mo[!grepl("\\(var|::", names(mo), ignore.case = TRUE)]
+mo <- mo[intersect(names(mo), tfs)]
+motifs <- c(motifs, mo[setdiff(names(mo), names(motifs))])
+
+# called de-novo on encode peaks:
+dn <- readRDS("missing_encode_motifs.rds")
+motifs <- c(motifs, dn[setdiff(names(dn), names(motifs))])
+saveRDS(motifs[sapply(motifs, FUN=function(x) x@icscore)>=10], file="OkMotifs_noCisTarget.rds")
+
+# cisTarget
+cistarget <- readRDS("cisTarget_motifs.rds")
+cistarget <- cistarget[intersect(tfs,setdiff(names(cistarget), names(motifs)))]
+
+motifs <- c(motifs, cistarget)
+motifs <- motifs[order(names(motifs))]
+```
+
+
+```{r}
+saveRDS(motifs, file="AllMotifs_onePerGene.rds")
+```

@@ -1,0 +1,60 @@
+---
+title: "Saving ATAC fragments in DHS"
+author: "Pierre-Luc Germain"
+date: "2025.04.22"
+output: html_document
+---
+
+```{r}
+suppressPackageStartupMessages({
+  library(Rsamtools)
+  library(rtracklayer)
+  library(GenomicAlignments)
+})
+data_path <- "/mnt/germain/datasets/ENCODE/new/atac/"
+Naround <- 100L
+```
+
+
+```{r}
+dhs <- readRDS("../01_consensus_regions/hybrid.custom.hg38.resized.resplit.rds")
+dhs <- reduce(resize(dhs, width(dhs)+(2*Naround), fix="center"))
+```
+
+
+```{r}
+lf <- list.files(data_path)
+for(f in lf){
+  dir.create(f, showWarnings = FALSE)
+  t1 <- Sys.time()
+  bams <- list.files(paste0(data_path,f),
+                     pattern="bam$", full=TRUE)
+  isPaired <- sapply(bams, FUN=function(x, samtools="/usr/bin/samtools", n=5000){
+    cmd <- paste0(samtools, ' view -h "', x, '" | head -n ', n, " | ", samtools, " view -S -c -f 1")
+    head(as.integer(system(cmd, intern=TRUE))>0,1)
+  })
+  # if we have paired data available for the context, use that:
+  if(sum(isPaired)>0){
+    bams <- bams[isPaired]
+    isPaired <- rep(TRUE, length(bams))
+  }
+  if(length(bams)>0){
+    gr <- lapply(seq_along(bams), FUN=function(b){
+      if(isPaired[[b]]){
+        flags <- scanBamFlag(isPaired=TRUE, isNotPassingQualityControls=FALSE, isDuplicate=FALSE, isSecondaryAlignment=FALSE)
+        a <- as(readGAlignmentPairs(bams[[b]], param=ScanBamParam(flags, mapqFilter=2L)),"GRanges")
+      }else{
+        flags <- scanBamFlag(isNotPassingQualityControls=FALSE, isDuplicate=FALSE, isSecondaryAlignment=FALSE)
+        a <- as(readGAlignments(bams[[b]], param=ScanBamParam(flags, mapqFilter=2L)),"GRanges")
+      }
+      a <- a[overlapsAny(a,dhs)]
+      resize(a, width=width(a)-8L, fix="center")
+    })
+    gr <- sort(unlist(GRangesList(gr)))
+    saveRDS(gr, paste0(f,"/fragsInDhs.rds"))
+    rm(gr)
+    message(f, " ", round(difftime(Sys.time(),t1,units= "mins"),2), "min")
+  }
+}
+```
+

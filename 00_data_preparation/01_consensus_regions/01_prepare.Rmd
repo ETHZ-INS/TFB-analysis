@@ -1,0 +1,114 @@
+---
+title: "Preparing consensus regions"
+author: "Pierre-Luc Germain"
+date: "2024/04/16"
+output: html_document
+---
+
+```{r}
+suppressPackageStartupMessages({
+  library(GenomicRanges)
+  library(BiocParallel)
+  library(rtracklayer)
+})
+source("region_prep_functions.R")
+```
+
+# Human
+
+First, gather per-celltype nucleosome-free peaks from the Zhang et al., Cell 2021 human scATAC atlas (GSE184462), and merge them with ENCODE consensus DHS
+
+```{r}
+lf <- list.files("GSE184462_peaks", pattern="narrowPeak", full=TRUE)
+peaks <- lapply(lf, rtracklayer::import)
+dhs <- data.table::fread("ENCFF503GCK.tsv", nThread = 2, select=1:3)
+peaks$dhs <- as(as.data.frame(dhs), "GRanges")
+```
+
+Reduce with resplit
+
+```{r}
+peaks2 <- reduceWithResplit(peaks, minTroughDepth=3L, BPPARAM=MulticoreParam(8, progress=TRUE))
+stillLarge <- peaks2[width(peaks2)>1500]
+peaks2 <- peaks2[width(peaks2)<=1500]
+peaks <- lapply(peaks, FUN=function(x) x[overlapsAny(x, stillLarge)])
+peaks3 <- reduceWithResplit(peaks, softMaxSize=1500, minTroughDepth=1L, relTroughDepth=1/10, BPPARAM=MulticoreParam(8, progress=TRUE))
+out <- sort(c(peaks2,peaks3))
+saveRDS(out, file="human_custom_consensus.rds")
+```
+
+# Mouse
+
+Do the same for the mouse:
+
+```{r}
+lf <- list.files("mouse_peaks", pattern="narrowPeak", full=TRUE)
+peaks <- lapply(lf, rtracklayer::import)
+peaks$dhs <- rtracklayer::import.bed("ENCFF910SRW.bed")
+peaks2 <- reduceWithResplit(peaks,minTroughDepth=3L, BPPARAM=MulticoreParam(8, progress=TRUE))
+stillLarge <- peaks2[width(peaks2)>1500]
+peaks2 <- peaks2[width(peaks2)<=1500]
+peaks <- lapply(peaks, FUN=function(x) x[overlapsAny(x, stillLarge)])
+peaks3 <- reduceWithResplit(peaks, softMaxSize=1500, minTroughDepth=1L, relTroughDepth=1/10, BPPARAM=MulticoreParam(8, progress=TRUE))
+out <- sort(c(peaks2,peaks3))
+saveRDS(out, file="mouse_custom_consensus.rds")
+```
+
+Lift the mouse regions to human:
+
+```{r}
+ah <- AnnotationHub::AnnotationHub()
+chain <- ah[["AH14528"]]
+b2 <- liftOver(out, chain)
+b2 <- b2[lengths(b2)>0]
+# remove small gaps
+b3 <- reduce(b2, min.gap=50L)
+# remove small chunks
+b3 <- b3[width(b3)>=50L]
+pp <- reduceWithResplit(sort(unlist(b3)), softMaxSize=1000L, minTroughDepth=1L)
+pp <- pp[width(pp)<=2000]
+saveRDS(pp, file="mouse_custom.lifted2hg38.rds")
+```
+
+# Hybrid
+
+Merge into a hybrid set :
+
+```{r}
+dhs <- readRDS("human_custom_consensus.rds")
+pp <- pp[!overlapsAny(pp, dhs, minoverlap=10L)]
+dhs2 <- reduce(sort(c(dhs,pp)), min.gap=0L)
+dhs2 <- keepSeqlevels(dhs2, grep("\\.|chrM", seqlevels(dhs2), value=TRUE, invert=TRUE), pruning.mode="coarse")
+saveRDS(dhs2, file="hybrid.custom.hg38.rds")
+```
+
+# Resize and resplit
+
+```{r}
+g <- readRDS("hybrid.custom.hg38.rds")
+g2 <- resizeToNonOverlapping(g)
+saveRDS(g2, "hybrid.custom.hg38.resized.rds")
+```
+
+# Splitting large regions
+
+Here we want to break up large regions (>=500) into smaller ones (>=100), putting
+breakpoints in areas devoid of motif
+
+```{r}
+g2 <- readRDS("hybrid.custom.hg38.resized.rds")
+gl <- g2[which(width(g2)>=400)]
+# just for speedup, not to load the genome-wide motifs:
+# rtracklayer::export.bed(gl, "tmp_long.bed")
+# system("bedtools intersect -u -wa -a /mnt/germain/datasets/encode_consensus_sets/motifs/hg38.archetype_motifs.v1.0.bed.gz -b tmp_long.bed > motifs_in_long_dhs.bed")
+mo <- data.table::fread("motifs_in_long_dhs.bed", nThread=4)
+mo <- GRanges(mo$V1, IRanges(mo$V2,mo$V3), motif=mo$V4)
+mo$motif <- factor(mo$motif)
+mo <- unlist(reduce(split(granges(mo), mo$motif)))
+regions <- resplitRegions(gl, mo)
+g2 <- sort(c(g2[which(width(g2)<400)], regions))
+g2 <- reduce(g2, min.gapwidth=0L)
+saveRDS(g2, "hybrid.custom.hg38.resized.resplit.rds")
+stopifnot(all(overlapsAny(g,g2)))
+```
+

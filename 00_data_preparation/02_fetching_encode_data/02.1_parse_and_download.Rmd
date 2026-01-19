@@ -1,0 +1,169 @@
+---
+title: "Parse encode"
+output: html_document
+date: "2025-04-17"
+---
+
+```{r}
+suppressPackageStartupMessages({
+  library(jsonlite)
+})
+```
+
+# Fetch ENCODE data:
+
+```{r, eval=FALSE}
+url <- "https://www.encodeproject.org/search/?format=json&type=Experiment&control_type%21=%2A&status=released&assay_title=TF+ChIP-seq&replicates.library.biosample.donor.organism.scientific_name=Homo+sapiens&assembly=GRCh38&limit=all&audit.ERROR.category!=extremely+low+read+depth&audit.ERROR.category!=missing+control+alignments&audit.ERROR.category!=control+extremely+low+read+depth"
+d <- fromJSON(url)
+d2 <- d$`@graph`
+saveRDS(d2, file="encode_chip.rds")
+
+url <- "https://www.encodeproject.org/search/?type=Experiment&status=released&replicates.library.biosample.donor.organism.scientific_name=Homo+sapiens&assembly=GRCh38&assay_title=ATAC-seq&audit.ERROR.category!=extremely+low+read+depth&limit=all"
+d <- fromJSON(url)
+da <- d$`@graph`
+saveRDS(da, file="encode_atac.rds")
+```
+
+```{r}
+da <- readRDS("encode_atac.rds")
+d2 <- readRDS("encode_chip.rds")
+```
+
+
+```{r}
+d2 <- d2[!sapply(d2$target$genes,is.null),]
+d2 <- d2[which(sapply(d2$target$genes,nrow)==1),]
+d2$gene <- unlist(d2$target$genes)
+
+d2$encodeID2 <- sapply(d2$dbxrefs, FUN=function(x){
+                    x <- grep("wgEncode",x,value=TRUE)
+                    if(length(x)==0) return(NA_character_)
+                    gsub(".+:","",x)
+                  })
+d2$GEO <- sapply(d2$dbxrefs, FUN=function(x){
+                    x <- grep("^GEO",x,value=TRUE)
+                    if(length(x)==0) return(NA_character_)
+                    gsub(".+:","",x)
+                  })
+
+da$context <- da$biosample_ontology$term_name
+d2$context <- d2$biosample_ontology$term_name
+da$context2 <- gsub("Homo sapiens ","",da$biosample_summary)
+d2$context2 <- gsub("Homo sapiens ","",d2$biosample_summary)
+da$context2 <- gsub(" nuclear fraction and unspecified fraction","",da$context2)
+
+# clear matches
+m1 <- merge(da[,c("accession","context2"),drop=FALSE],
+            d2[,c("accession","context2","gene","GEO","encodeID2")],
+            by="context2", suffix=c(".atac",".chip"))
+
+d2 <- d2[which(!(d2$context2 %in% da$context2)),]
+# if removing age gives a match, do so (flag the relevant ids)
+d2$context2 <- gsub(" male adult \\([0-9]+ years\\)| female adult \\([0-9]+ years\\)","",d2$context2)
+da$context2 <- gsub(" male adult \\([0-9]+ years\\)| female adult \\([0-9]+ years\\)","",da$context2)
+m2 <- merge(da[,c("accession","context2"),drop=FALSE],
+            d2[,c("accession","context2","gene","GEO","encodeID2")],
+            by="context2", suffix=c(".atac",".chip"))
+
+d2 <- d2[which(!(d2$context2 %in% da$context2)),]
+# if we already have data for that gene, drop it
+d2 <- d2[which(!(d2$gene %in% unique(c(m1$gene,m2$gene)))),]
+# if there's a genetic insertion of the chipped gene, remove that treatment from the chip
+d2 <- d2[!grepl("treated", d2$context2),]
+d2$context2 <- gsub(" genetically modified.+| stably expressing.+", "",d2$context2)
+da$context2 <- gsub(" genetically modified.+| stably expressing.+", "",da$context2)
+m3 <- merge(da[,c("accession","context2"),drop=FALSE],
+            d2[,c("accession","context2","gene","GEO","encodeID2")],
+            by="context2", suffix=c(".atac",".chip"))
+
+mm <- dplyr::bind_rows(list(full=m1, good=m2, poor=m3), .id="matchType")
+colnames(mm)[2] <- "context"
+
+mm$context <- gsub(" |-","_",gsub(",|'|(|)","", tools::toTitleCase(mm$context)))
+
+# left out are chiefly the HEK293 chips
+
+saveRDS(mm, file="match.rds")
+```
+
+# Downloading ChIP
+
+```{r}
+dir.create("chip")
+ch <- mm[!duplicated(mm$accession.chip),-3]
+colnames(ch) <- gsub(".chip","",colnames(ch), fixed=TRUE)
+out <- dplyr::bind_rows(pbapply::pbsapply(seq_len(nrow(ch)), FUN=function(i){
+  exp <- ch[i,]
+  folder <- paste0("chip/",as.character(exp$context))
+  dir.create(folder, showWarnings = FALSE)
+
+  url <- paste0("https://www.encodeproject.org/search/?type=File&dataset=/experiments/", exp$accession, "/&frame=object&assembly=GRCh38&file_format=bed&status=released&file_format_type=narrowPeak&limit=all")
+  d <- try(fromJSON(url)$`@graph`, silent=TRUE)
+  if(is(d, "try-error")) return(NULL)
+  if(any(lengths(d$biological_replicates)==1)){
+    d <- d[lengths(d$biological_replicates)==1,]
+  }
+  
+  priority <- c("IDR thresholded peaks", "optimal IDS thresholded peaks", 
+                "pseudoreplicated peaks", "conservative IDR thresholded peaks", "peaks")
+  i <- 1L
+  while(i <= length(priority)){
+    if(any(d$output_type==priority[i])){
+      d <- d[d$output_type==priority[i],]
+      i <- Inf
+    }
+    i <- i + 1L
+  }
+  
+  d$name <- paste0(d$accession,"_",exp$gene,"_",exp$gene,"_encode_",exp$context,".bed.gz")
+  d$url <- paste0("https://www.encodeproject.org/files/", d$accession, "/@@download/", d$accession, ".bed.gz")
+  d$success <- sapply(seq_len(nrow(d)), FUN=function(j){
+    tryCatch({
+      download.file(d$url[j], paste0(folder, "/", d$name[j]))
+      return(TRUE)
+    }, error=function(e){
+      return(FALSE)
+    })
+  })
+  d
+}))
+saveRDS(out, "chip.download.rds")
+```
+
+
+
+# Downloading ATAC
+
+```{r, eval=FALSE}
+atac <- mm[,2:3]
+atac <- atac[!duplicated(atac),]
+dir.create("atac")
+resl <- dplyr::bind_rows(pbapply::pblapply(seq_len(nrow(atac)), FUN=function(i){
+  exp <- atac[i,]
+  folder <- paste0("atac/",as.character(exp$context))
+
+  url <- paste0("https://www.encodeproject.org/search/?type=File&dataset=/experiments/", exp$accession, "/&frame=object&assembly=GRCh38&file_format=bam&output_type=alignments&status=released&limit=all")
+  d <- fromJSON(url)$`@graph`
+  if(any(lengths(d$biological_replicates)==1)){
+    d <- d[lengths(d$biological_replicates)==1,]
+  }
+  
+  d$name <- paste0(d$accession,"_",exp$context,".bam")
+  d$url <- paste0("https://www.encodeproject.org/files/", d$accession, "/@@download/", d$accession, ".bam")
+  d <- d[,c("url","name")]
+  d$context <- exp$context
+  d
+}))
+resl$to <- paste0("atac/",resl$context,"/",resl$name)
+saveRDS(resl, "atac.toDownload.rds")
+for(f in unique(resl$context)) dir.create(paste0("atac/",f))
+write.table(resl[,c(1,4)], "atac.toDownload.tsv", sep="\t", col.names = FALSE, row.names = FALSE, quote = FALSE)
+```
+
+```{bash, eval=FALSE}
+while read -u 9 -r src target
+do
+curl -L --retry 4 -s -o "$target" "$src"
+done 9< atac.toDownload.tsv
+```
+

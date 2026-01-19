@@ -1,0 +1,63 @@
+---
+title: "Get missing motifs"
+output: html_document
+date: "2024-11-15"
+---
+
+```{r}
+suppressPackageStartupMessages({
+  library(GenomicRanges)
+  library(memes)
+  library(BSgenome.Hsapiens.UCSC.hg38)
+})
+dir.create("encode_fasta")
+dir.create("encode_motifs")
+chip_path <- "../02_fetching_encode_data"
+```
+
+```{r}
+chips <- readRDS(file.path(chip_path, "chips.rds"))
+mo <- readRDS("AllMotifs_onePerGene.rds")
+chips <- chips[which(!(chips$gene %in% names(mo))),]
+chips$path <- paste0(chip_path, "/",chips$context,"/",chips$accession,"_",chips$gene,"_",chips$gene,"_encode_",chips$context,".bed.gz")
+bedlist <- split(chips$path, chips$gene)
+beds <- bedlist$ZNF138
+tfs <- setdiff(unique(d3$gene), names(mo))
+for(g in tfs){
+  print(g)
+  beds <- list.files(chip_path, "/", pattern=paste0("_",g,"_"), recursive = TRUE, full=TRUE)
+  grs <- lapply(beds, rtracklayer::import, format="narrowPeak")
+  grs <- lapply(grs, FUN=function(x){
+    resize(IRanges::shift(x,x$peak), pmin(width(x),200L))
+  })
+  if(mean(lengths(grs))>3000){
+    grs <- lapply(grs, FUN=function(x){
+      x[x$score>=median(x$score)]
+    })
+  }
+  gr <- reduce(unlist(GRangesList(grs)), with.revmap=TRUE)
+  i <- 0L
+  while(i<length(beds) & length(w <- which(lengths(gr$revmap)>=(length(beds)-i)))<200){
+    i <- i+1L
+  }
+  gr <- resize(gr[w], width = 100L, fix="center")
+  seqs <- getSeq(BSgenome.Hsapiens.UCSC.hg38, gr)
+  names(seqs) <- paste0("p",seq_along(seqs))
+  writeXStringSet(seqs, paste0("encode_fasta/",g,".fasta"))
+}
+```
+
+```{bash}
+for f in fasta/*.fasta; do 
+  f2=`basename $f .fasta`
+  meme -dna -text -nmotifs 1 -minw 8 -maxw 20  -p 12 $f > encode_motifs/$f2.txt
+done
+```
+
+```{r}
+lf <- list.files("encode_motifs", pattern="txt$", full=TRUE)
+names(lf) <- gsub("\\.txt","",basename(lf))
+mo <- lapply(lf, universalmotif::read_meme)
+saveRDS(mo, "missing_encode_motifs.rds")
+```
+

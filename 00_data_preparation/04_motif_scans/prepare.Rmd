@@ -1,0 +1,34 @@
+---
+title: "Preparing motif files"
+output: html_document
+date: "2025-05-20"
+---
+
+```{r}
+suppressPackageStartupMessages({
+  library(TFBlearner)
+  library(GenomicRanges)
+  library(universalmotif)
+  library(motifmatchr)
+  library(BSgenome.Hsapiens.UCSC.hg38)
+  library(BiocParallel)
+})
+#source("/mnt/germain/plger/stuff/TFBlearner/R/prepMotifs.R")
+```
+
+```{r}
+motifs <- readRDS("../03_motif_aggregation/AllMotifs_onePerGene.rds")
+dhs <- readRDS("../01_consensus_regions/hybrid.custom.hg38.resized.resplit.rds")
+```
+
+```{r}
+bp <- MulticoreParam(20)
+fps <- prepMotifs( refCoords = dhs, motifs = motifs, outputFolder = "./",
+                   topPlusCoOnly = TRUE, BPPARAM = bp,
+                   genome = BSgenome.Hsapiens.UCSC.hg38 )
+```
+
+```{r}
+sessionInfo()
+```
+

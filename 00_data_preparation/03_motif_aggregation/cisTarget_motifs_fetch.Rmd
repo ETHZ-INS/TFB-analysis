@@ -1,0 +1,44 @@
+---
+title: "cistarget_motifs"
+output: html_document
+date: "2024-06-03"
+---
+
+```{r}
+suppressPackageStartupMessages({
+  library(universalmotif)
+  library(BiocParallel)
+})
+```
+
+```{r, eval=FALSE}
+download.file("https://resources.aertslab.org/cistarget/motif_collections/v10nr_clust_public/v10nr_clust_public.zip", "v10nr_clust_public.zip")
+unzip("v10nr_clust_public.zip")
+unlink("v10nr_clust_public.zip")
+```
+
+```{r}
+# read in the motifs
+lf <- list.files("v10nr_clust_public/singletons/", full=TRUE)
+names(lf) <- gsub("\\.cb$", "", basename(lf))
+m <- lapply(lf, FUN=function(x){
+  x <-  universalmotif::read_homer(x)
+  if(length(x)>1) x <- universalmotif::merge_motifs(x)
+  x
+})
+
+# read in the tf-motif table
+e <- as.data.frame(data.table::fread("v10nr_clust_public/snapshots/motifs-v10-nr.hgnc-m0.00001-o0.0.tbl"))
+# keep only motifs in those we have
+e <- e[e[,1] %in% names(m),]
+e <- e[order(e$gene_name, -log10(e$motif_similarity_qvalue)*e$orthologous_identity),]
+m2 <- bplapply(split(e[,1], e$gene_name), BPPARAM=MulticoreParam(3, progress=TRUE), FUN=function(x){
+   x <- m[head(unique(x),5)]
+   if(length(x)>1) x <- universalmotif::merge_motifs(x)
+   if(is.list(x)) x <- x[[1]]
+   x
+})
+for(f in names(m2)) m2[[f]]@name <- f
+saveRDS(m2, "cisTarget_motifs.rds")
+```
+

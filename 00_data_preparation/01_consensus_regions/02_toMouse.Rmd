@@ -1,0 +1,92 @@
+---
+title: "Preparing consensus regions"
+author: "Pierre-Luc Germain"
+date: "2024/04/16"
+output: html_document
+---
+
+```{r}
+suppressPackageStartupMessages({
+  library(GenomicRanges)
+  library(BiocParallel)
+  library(rtracklayer)
+  library(AnnotationHub)
+})
+source("region_prep_functions.R")
+ah <- AnnotationHub::AnnotationHub()
+```
+
+```{r}
+h <- readRDS("hybrid.custom.hg38.resized.resplit.rds")
+chain <- ah[["AH14109"]] # hg38 to mm10
+m <- rtracklayer::liftOver(h, chain)
+```
+
+```{r}
+names(h) <- names(m) <- as.character(granges(h))
+ids <- data.frame(row.names=names(m), id=seq_along(m), status=NA)
+ids$status[which(lengths(m)==0)] <- "absent"
+# remove small gaps
+m <- reduce(m, min.gap=10L)
+
+w <- which(lengths(m)==1)
+ids$status[w] <- "match"
+m_uniq <- unlist(m[w])
+m3 <- m[which(lengths(m)>1)]
+
+# remove small chunks (absolute thresh plus relative to length of the biggest chunk)
+prop <- relist(width(unlist(m3))/rep(as.integer(max(width(m3))), lengths(m3)), m3)
+m3 <- m3[width(m3)>=20L | prop>1/3]
+
+w <- which(lengths(m3)==1)
+ids[names(m3)[w],"status"] <- "partial"
+
+# if the entire region is not too large, merge
+m_uniq <- c(m_uniq, unlist(m3[w]))
+m3 <- m3[-w]
+w <- which( min(end(m3))-min(start(m3)) < 1500)
+merged <- reduce(m3[w], min.gap=1000L)
+m_uniq <- c(m_uniq, unlist(merged))
+ids[names(m3)[w], "status"] <- "split"
+
+m4 <- m3[-w]
+if(length(m4)>0) ids[names(m4)[w], "status"] <- "dropped"
+
+m <- sort(m_uniq)
+m$status <- factor(ids[names(m),"status"])
+```
+
+```{r}
+m2 <- reduce(m, with.revmap=TRUE, min.gapwidth=0L)
+m1 <- m2[lengths(m2$revmap)==1]
+m2 <- m2[lengths(m2$revmap)>1]
+ids$overlap <- row.names(ids) %in% unique(names(m)[unlist(m2$revmap)])
+# get rid of those with too many overlaps
+ids[names(m)[unique(unlist(m2$revmap[which(lengths(m2$revmap)>10)]))], "status"] <- "tooManyOverlaps"
+m2 <- m2[lengths(m2$revmap)<=10]
+# keep the largest of the mappers
+tmp <- relist(width(m)[unlist(m2$revmap)], m2$revmap)
+largest <- m[mapply(v=m2$revmap, w=which.max(tmp), \(v,w) v[w])]
+
+m5 <- sort(c(m[unlist(m1$revmap)], largest))
+m6 <- resizeToNonOverlapping(m5)
+
+# remove regions that became too small
+w <- which(width(m6)<20 | (width(m6)<100 & width(m6)<(width(h[names(m6)])/3)))
+ids[names(m6[w]),"status"] <- "tooSmall"
+
+m <- m6[-w]
+
+ids$status <- factor(ids$status)
+table(ids$status, useNA="always")
+```
+
+```{r}
+saveRDS(m, file="mm10regions.rds")
+saveRDS(ids, file="mm10status.rds")
+```
+
+```{r}
+sessionInfo()
+```
+

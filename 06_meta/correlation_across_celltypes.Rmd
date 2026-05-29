@@ -105,3 +105,15 @@ theme_set(theme_bw())
   (ggplot(d, aes(value, ChromatinOpeningType)) + stat_summary(na.rm = TRUE) + facet_wrap(~variable, scale="free_x", nrow=1))
 ```
 
+```{r}
+anno <- anno[!is.na(anno$meanZ),]
+anno$nContexts2 <- factor(anno$nContexts2)
+levels(anno$nContexts2) <- c("1","2","3",">=4")
+ggplot(anno, aes(anno$nContexts2, meanZ)) + geom_violin(fill="lightgrey") + stat_summary() +
+  labs(y="Correlation of predictions across\ncontexts (z-score of Jaccard+Pearson)",
+       x="Number of contexts")
+ggplot(anno, aes(anno$nContexts2, jac)) + geom_violin(fill="lightgrey") + stat_summary() +
+  labs(y="Jaccard of top 500",
+       x="Number of contexts")
+```
+

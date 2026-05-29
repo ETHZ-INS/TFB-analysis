@@ -66,9 +66,9 @@ suppTable1 <- suppTable1[,.(db_id_ATAC=paste(db_id_ATAC, collapse=";"),
 suppTable1[,context_id:=fifelse(context_id=="33", "165", 
                                 as.character(context_id))]
 suppTable1[,set:=fifelse(grepl("HEK293", context), "train", set)]
-write.table(suppTable1, 
-            file="Supplementary_table1_rawData.tsv",
-            sep="\t", quote=FALSE, row.names=FALSE)
+write.table(suppTable1,
+           file="Supplementary_table1_rawData.tsv",
+           sep="\t", quote=FALSE, row.names=FALSE)
 ```
 
 ```{r, supplementary table 2 - aggregated data}
@@ -103,9 +103,14 @@ suppTable2 <- merge(suppTable2,
                     by.x=c("tf_name"), 
                     by.y=c("tf_name"), 
                     all.x=TRUE, all.y=FALSE)
+suppTable2[,isLambertTf:=fifelse(is.na(isLambertTf), FALSE, TRUE)]
+suppTable2[,hasMotif:=fifelse(tf_name %in% colData(mae[["Motifs"]])$motifName, TRUE, FALSE)]
+
 write.table(suppTable2, 
             file="Supplementary_table2_aggregated.tsv",
-            sep="\t", quote=FALSE, row.names=FALSE)
+            sep="\t", 
+            quote=FALSE, 
+            row.names=FALSE)
 ```
 
 ```{r, numbers, eval=TRUE}

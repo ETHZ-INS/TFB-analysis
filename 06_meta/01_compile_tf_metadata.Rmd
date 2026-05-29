@@ -19,7 +19,7 @@ suppressPackageStartupMessages({
 h1 <- fread("hocomoco13_tfs.tsv")
 h1 <- as.data.frame(h1[!grepl("MOUSE",h1$`curated:uniprot_id`),])
 row.names(h1) <- h1$`auto:gene_symbol`
-h <- h1[,c(2:6)]
+h <- h1[,c(2:6,15)]
 colnames(h) <- gsub("tfclass:","",colnames(h),fixed=TRUE)
 ```
 
@@ -34,13 +34,19 @@ h$domainClans <- lapply(relist(clans[unlist(h$domains), "V3"], h$domains), \(x){
                           unique(x[which(x!="")])
                         })
 ```
+
 ```{r}
 e <- as.data.frame(readxl::read_xlsx("Lambert2018_Supp_TFs.xlsx", sheet = 2, skip=1, guess_max = 3000))
-row.names(e) <- e$Name
-e <- e[e[,4]=="Yes",]
-e$isLambertTf <- TRUE
+allgenes <- genes(EnsDb.Hsapiens.v86)
+ens2sym <- setNames(allgenes$symbol, allgenes$gene_id)
+e$symbol <- ens2sym[e$ID]
+w <- which(is.na(e$symbol))
+e$symbol[w] <- e$Name[w]
+row.names(e) <- e$symbol
+e$isLambertTf <- e[,4]=="Yes"
 e <- e[,c("DBD", "Binding mode", "isLambertTf")]
 m <- merge(e,h,by="row.names",all=TRUE)
+m$isTF <- m$isLambertTf | m$GRECO_dbTF=="yes"
 ```
 
 
@@ -57,7 +63,7 @@ m$effector <- effd[m$Row.names]
 
 ```{r}
 e <- as.data.frame(readxl::read_excel("/mnt/nvme1/analysis/data/meta_data/tf_class_pred_ehsani_2016.xls"))
-row.names(e) <- e$Symbol
+row.names(e) <- e$`Approved symbol`
 m <- merge(m, e[,6:16], by.x="Row.names", by.y="row.names", all.x=TRUE)
 ```
 
@@ -95,6 +101,7 @@ seqlevels(proms) <- paste0("chr",seqlevels(proms))
 d <- distanceToNearest(rowRanges(chip), proms)
 d <- mcols(d)$distance
 saveRDS(d, file="PRE_distance_to_TSS.rds")
+d <- readRDS("PRE_distance_to_TSS.rds")
 ch <- as(assay(chip), "sparseMatrix")
 ch <- as(ch, "TsparseMatrix")
 w <- which(ch@x>0.1)
@@ -127,6 +134,7 @@ perf <- lapply(names(lf), \(x){
 perf <- dplyr::bind_rows(perf[!sapply(perf, is.null)])
 
 anno <- merge(m, perf, by.x="row.names", by.y="tf", all=TRUE)
+anno$isTF[is.na(anno$isTF)] <- FALSE
 # anno$generalizability <- pmin(1,1 + (anno$meanCvAUPRC-anno$meanFinalAUPRC)/anno$meanFinalAUPRC)
 # anno$generalizability[which(anno$meanFinalAUPRC<0.05)] <- NA_real_
 anno$DBD[which(anno$DBD=="Unknown")] <- NA
@@ -154,7 +162,8 @@ anno$customClass[grep("undefined", anno$customClass)] <- NA_character_
 anno$customClass[which(is.na(anno$superclass) & anno$SotoFamily=="C2H2 ZF")] <- "C2H2 zinc fingers"
 anno$customClass[which(anno$customClass=="Basic helix-loop-helix factors (bHLH)")] <- "bHLH"
 anno$customClass[which(anno$customClass=="Basic leucine zipper factors (bZIP)")] <- "bZIP"
-anno$customClass <- factor(anno$customClass,unique(anno$customClass[order(anno$superclass)]))
+anno$customClass[which(!anno$isTF)] <- "non-TF"
+anno$customClass <- relevel(factor(anno$customClass,unique(anno$customClass[order(anno$superclass)])), "non-TF")
 ```
 
 

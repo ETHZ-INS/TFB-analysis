@@ -40,7 +40,7 @@ saveRDS(ds, file="benchmarkDatasets1.rds")
 
 We add to these the contexts used for the crowdedness analysis
 
-```{r}
+```{r, eval=FALSE}
 bestPredContext <- c(bestPredContext, GM12878 = "102", HepG2 = "156", K562 = "165", MCF_7 = "173", HEK293 = "260")
 
 for(n in names(bestPredContext)){
@@ -58,15 +58,15 @@ Preparing the max predicted score matrix:
 lf <- list.files("../data/predictions", pattern="maxpred\\.txt\\.gz$", recursive = TRUE, full=TRUE)
 names(lf) <- basename(dirname(lf))
 m <- sapply(lf, \(x) as.data.frame(data.table::fread(x))[,1])
-m <- as(m, "sparseMatrix")
+#m <- as(m, "sparseMatrix")
 saveRDS(m, file="maxPreds.rds")
-cc <- cor(as.matrix(m))
-saveRDS(cc, file="maxPreds_correlations.rds")
+#cc <- cor(as.matrix(m))
+#saveRDS(cc, file="maxPreds_correlations.rds")
 ```
 
 Preparing the corresponding motifs:
 
-```{r}
+```{r, eval=FALSE}
 library(universalmotif)
 motifs <- readRDS("../00_data_preparation/03_motif_aggregation/AllMotifs_onePerGene.rds")
 # inject back a good GR motif:

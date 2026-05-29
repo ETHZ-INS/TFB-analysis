@@ -21,6 +21,10 @@ source("../../functions.R")
 
 ```{r, eval=TRUE}
 preds <- readRDS("preds_ESC.rds")
+tfs <- readRDS("../../../06_meta/TF_annotation.rds")
+tfs <- row.names(tfs)[which(tfs$isTF)]
+preds <- preds[,intersect(colnames(preds), tfs)]
+
 r <- readRDS("../../../00_data_preparation/01_consensus_regions/hybrid.custom.hg38.resized.resplit.rds")
 # ENCODE distal links:
 lf <- list.files("e2g", pattern="bed\\.gz$", full=TRUE)
@@ -49,11 +53,11 @@ saveRDS(m, "links.rds")
 
 # Prepare motifs
 
-```{r, eval=TRUE}
+```{r, eval=FALSE}
 w <- which(rowSums(m)>0)
 regions <- r[w]
 genome <- "/reference/Homo_sapiens/GENCODE/GRCh38.p14/Sequence/WholeGenomeFasta/GRCh38.primary_assembly.genome.fa"
-motifs <- readRDS("/mnt/nvme1/analysis/09_DTFA/motifs.rds")
+motifs <- readRDS("../../motifs.rds")
 moi <- motifmatchr::matchMotifs(motifs, regions, genome=Rsamtools::FaFile(genome))
 saveRDS(moi, file="motifMatches.rds")
 ```

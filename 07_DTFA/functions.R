@@ -191,3 +191,4 @@ stagedMLM <- function(mat, annotation, BP=BiocParallel::SerialParam(), ...){
   w <- which(rowMedians(abs(res1))>1)
   
 }
+

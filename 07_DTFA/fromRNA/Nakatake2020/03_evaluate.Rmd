@@ -57,9 +57,9 @@ saveRDS(o, "results.rds")
 
 tt <- as.data.frame(t(sapply(o, \(x) colSums(x$summary[,1:4]))))
 tt <- tt[order(-tt$inTop10/tt$isAnnotated),]
-
-tt2 <- tt[c("noInterLogCPM_predsReweigh.norm", "noInter_prox.norm", "collecTRI", "motifs.raw"),]
-tt2$method <- c("Predictions+Links", "Predictions\n(Promoters only)", "collecTRI", "Motifs+Links")
+row.names(tt) <- gsub("^res_", "", row.names(tt))
+tt2 <- tt[c("logCPM_predsReweigh.raw", "logCPM_proxReweigh.raw", "logCPM_preds.raw", "logCPM_collecTRI", "logCPM_motifs.raw"),]
+tt2$method <- c("Predictions\n(reweighted)+Links", "Predictions (reweighted)\n(Promoters only)", "Predictions\n(raw)+Links", "collecTRI", "Motifs+Links")
 tt2$propTop10 <- tt2$inTop10/tt2$isAnnotated
 
 tv <- sapply(o, \(x) x$summary[,"t"])

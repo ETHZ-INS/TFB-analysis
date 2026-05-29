@@ -8,6 +8,9 @@ output: html_document
 suppressPackageStartupMessages({
   library(ggplot2)
   library(data.table)
+  library(lightgbm)
+  library(BiocParallel)
+  library(TFBlearner)
 })
 setDTthreads(4)
 source("../utils/load_all.R", chdir=TRUE)
@@ -18,10 +21,10 @@ source("../utils/load_all.R", chdir=TRUE)
 hpFiles <- list.files("../data/predictions", recursive=TRUE, 
                         pattern="hyperParams_", full.names=TRUE)
 names(hpFiles) <- basename(dirname(hpFiles))
-hp <- lapply(hpFiles, function(hpFile){
+hp <- bplapply(hpFiles, BPPARAM=SnowParam(20, progress=TRUE), function(hpFile){
+  tf <- basename(dirname(hpFile))
   hp <- tryCatch({
     hp <- fread(hpFile)
-    tf <- basename(dirname(hpFile))
     as.data.frame(hp)
   }, error=function(e){ NULL })
   if(is.null(hp)) return(NULL)
@@ -29,10 +32,31 @@ hp <- lapply(hpFiles, function(hpFile){
   tryCatch({
     mod <- TFBlearner::loadModels(file.path(dirname(hpFile), 
                                   paste0(paste("model",tf, sep="_"), ".txt")))
+    
+    dt <- lgb.model.dt.tree(mod$all_pos)
+    leafWeightsAllPos <- dt[is.na(split_feature), leaf_value]
+    
+    dt <- lgb.model.dt.tree(mod$all_weighted_pos)
+    leafWeightsAllWeighted <- dt[is.na(split_feature), leaf_value]
+    
+    dt <- lgb.model.dt.tree(mod$med_weighted_pos)
+    leafWeightsMedWeighted <- dt[is.na(split_feature), leaf_value]
+
+    dt <- lgb.model.dt.tree(mod$top_weighted_pos)
+    leafWeightsTopWeighted <- dt[is.na(split_feature), leaf_value]
+    
     modDt <- data.frame(num_trees=c(mod$all_pos$num_trees(),
                                     mod$all_weighted_pos$num_trees(),
                                     mod$med_weighted_pos$num_trees(),
                                     mod$top_weighted_pos$num_trees()), 
+                        ssw=c(sum(leafWeightsAllPos^2), 
+                              sum(leafWeightsAllWeighted^2),
+                              sum(leafWeightsMedWeighted^2),
+                              sum(leafWeightsTopWeighted^2)),
+                        asw=c(sum(abs(leafWeightsAllPos)),
+                              sum(abs(leafWeightsAllWeighted)),
+                              sum(abs(leafWeightsMedWeighted)),
+                              sum(abs(leafWeightsTopWeighted))),
                         submodel=c("all_pos", "all_weighted_pos", 
                                    "med_weighted_pos", "top_weighted_pos"))
     merge(hp, modDt, by="submodel")
@@ -44,33 +68,7 @@ hp <- lapply(hpFiles, function(hpFile){
 table((hpIsNull <- sapply(hp, is.null)))
 hp <- dplyr::bind_rows(hp[!hpIsNull], .id="TF")
 hp$sumLearning <- hp$learning_rate*hp$num_trees
-hp$tree_complexity <- hp$sumLearning*hp$num_leaves
+hp$tree_complexity <- (1/2)*hp$lambda_l2*hp$ssw+hp$lambda_l1*hp$asw
 saveRDS(hp, file="hyperparams.rds")
-```
-
-```{r}
-summary((lm(log1p(tree_complexity)~TF, data=hp)))$adj.r.squared
-```
-
-Most of the variance in model complexity is explained by TFs, as opposed to the different models within a TF
-
-```{r}
-hp <- hp[which(hp$model=="full_model").]
-anno <- readRDS("TF_annotation.rds")
-ag <- aggregate(hp[,grep("learning|lambda|num_|min_gain|_fraction|sum_|complexity", colnames(hp))], by=hp[,"TF",drop=FALSE], FUN=mean)
-m <- merge(anno, ag, by="TF")
-
-m$sqrtComplexity <- sqrt(m$tree_complexity)
-m$sqrtRegularization <- sqrt(m$lambda_l1+m$lambda_l2)
-
-cor.test(m$sqrtComplexity, m$meanFinalAUPRC)
-cor.test(m$sqrtComplexity, m$sqrtRegularization)
-```
-
-Complexity is correlated to regularization, as well as to the final AUPRC (regularization is not)
-
-```{r}
-doSEMplot(m, vars=c("sqrtComplexity", "sqrtRegularization"))
-doSEMplot(m, group.by = "ChromatinOpeningType", vars=c("sqrtComplexity", "sqrtRegularization"))
 ```
 

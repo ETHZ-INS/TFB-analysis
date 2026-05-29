@@ -137,6 +137,11 @@ tfFeats <- c("Binding_Patterns", "Promoter_Association", "C_Score",
 if(!(tfName %in% rowData(mae[["ATAC.Promoters"]])$tf_name)){
   tfFeats <- setdiff(tfFeats, "Promoter_Association")
 }
+
+if(is.null(tfCofactors) | length(tfCofactors)==0){
+  tfFeats <- setdiff(tfFeats, "Cofactor_Binding")
+}
+
 ptm <- proc.time()
 mae <- tfFeatures(mae,
                   tfName=tfName,

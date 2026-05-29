@@ -33,7 +33,7 @@ nTfs <- nTfs[which(nTfs$value>0),-1]
 b <- round(seq(from=1, to=sqrt(300), length.out=4)^2)
 p_cwd <- ggplot(nTfs, aes(value)) + geom_histogram(bins=27, fill=tfContextColors[1]) + scale_x_sqrt(breaks=b) + 
   facet_wrap(~Var2, scale="free_x", nrow=1) + theme_sleek() + scale_y_sqrt(breaks=c(0,250000,1000000), labels=c(0,250,1000)) +
-  labs(x="Number of TFs with peaks centers in the same PRE", y="Thousands\nof regions") +
+  labs(x="Number of CAPs with peaks centers in the same PRE", y="Thousands\nof regions") +
   geom_vline(data=med, aes(xintercept=value), linetype="dashed") + coord_cartesian(ylim=c(0,1000000))
 p_cwd
 ```
@@ -55,7 +55,7 @@ hex_fun <- function(data, mapping, ...){
 }
 
 # Pairwise plot matrix
-p_cwd_pairwise <- GGally::ggpairs(as.data.frame(100*crwd3[which(rowSums(crwd3)>0),]), lower = list(continuous = hex_fun), diag="blank", legend=11, progress=FALSE) +   labs(x="Crowdedness (% of assayed TFs)", fill="# of\nregions") + theme(panel.border = element_blank())
+p_cwd_pairwise <- GGally::ggpairs(as.data.frame(100*crwd3[which(rowSums(crwd3)>0),]), lower = list(continuous = hex_fun), diag="blank", legend=11, progress=FALSE) +   labs(x="Crowdedness (% of assayed CAPs)", fill="Number of\nregions") + theme(panel.border = element_blank())
 p_cwd_pairwise <- ggmatrix_gtable(p_cwd_pairwise)
 ```
 
@@ -84,7 +84,7 @@ dat1$crwd2 <- 200*100*(dat1$crwd/attr(context.crwd, "nTFs")[as.integer(dat1$cont
 dat1$ATAC2 <- 200*dat1$ATAC/pmax(200,dat1$width)
 p_cwd_atac <- ggplot(dat1, aes(ATAC2, crwd2)) + geom_hex(bins=40) +  theme_sleek() +
   scale_fill_gradient(low="lightgrey", high="darkblue", trans="log", breaks=c(1,200,40000)) + 
-  labs(x="Accessibility (ATAC read density/200bp)", y="Crowdedness (% of TFs)", fill="# of regions") + scale_y_sqrt(breaks=c(1,20,60)) + scale_x_log10(breaks=c(5,150,5000)) + facet_wrap(~context) + coord_cartesian(ylim=c(1,115)) +
+  labs(x="Accessibility (ATAC read density/200bp)", y="Crowdedness (% of CAPs)", fill="# of regions") + scale_y_sqrt(breaks=c(1,20,60)) + scale_x_log10(breaks=c(5,150,5000)) + facet_wrap(~context) + coord_cartesian(ylim=c(1,115)) +
   theme(legend.position="inside", legend.position.inside = c(0.85, 0.2), legend.key.height = unit(0.3,"cm"))
 p_cwd_atac
 ```
@@ -98,7 +98,7 @@ dp2$variable[which(dp2$variable=="both")] <- "promoters"
 p.pp <- ggplot(dp2, aes(celltype, 100*value)) + 
     geom_col(aes(fill=reorder(variable, value))) + theme_sleek() +
     labs(y="% of highly-\ncrowded regions", x=NULL, fill=NULL) +
-    scale_fill_manual(values=cbbPalette[5:6])+
+    scale_fill_manual(values=cbbPalette[c(2,4)])+
     theme(axis.text.x=element_text(angle=90, vjust=0.5, hjust=1), legend.position = "top") +
     geom_text(data=dpn, aes(y=0, label=paste0("n=",n)), hjust=0, nudge_y = 3, angle = 90, size=3.5, color="grey20")
 
@@ -193,21 +193,38 @@ p4 <- ggplot(m3, aes(value, reorder(customClass, crowdedness))) + stat_summary()
 
 ```{r}
 d3 <- readRDS("../08_crowdedness/crowdedness_GR_rna.rds")
-ag <- aggregate(d3[,c("log2FC","scaledLFC")], by=d3[,c("sample","timePoint","crowdset","type")], FUN=\(x) mean(x))
-levels(ag$crowdset) <- c(paste0("GR peak\n", levels(ag$crowdset)[1:3]), "matched\nno GR")
+ag1 <- aggregate(d3[,c("log2FC","scaledLFC")], by=d3[,c("sample","timePoint","crowdset")], FUN=\(x) mean(x))
+ag2 <- aggregate(d3[,c("log2FC","scaledLFC")], by=d3[,c("sample","timePoint","crowdset")], FUN=\(x) 100*sum(x>0.3)/length(x))
+levels(ag1$crowdset) <- levels(ag2$crowdset) <- c(paste0("GR peak\n", levels(ag1$crowdset)[1:3]), "matched\nno GR")
 
 base_pal <- brewer.pal(9, "Blues")
 pal20All <- colorRampPalette(base_pal)(20)
-pal20 <- pal20All[(length(pal20All)-length(levels(ag$timePoint))):(length(pal20All)-1)]
+pal20 <- pal20All[(length(pal20All)-length(levels(ag1$timePoint))):(length(pal20All)-1)]
 
-p2 <- ggplot(ag, aes(crowdset, log2FC, fill=timePoint)) + geom_boxplot(outliers = FALSE) + 
-  theme_sleek() + labs(y="log2FC", x="Promoters",
-                       fill="Time after\nactivation",
-                       ) + facet_wrap(~type, nrow=2, scale="free_y") +
-    scale_color_manual(values=pal20)+
-    scale_fill_manual(values=pal20)+
-    guides(fill = guide_legend(ncol = 2), color = guide_legend(ncol = 2))
+p2a <- ggplot(ag1, aes(crowdset, log2FC, fill=timePoint)) + geom_boxplot(outliers = FALSE) + 
+  theme_sleek() + labs(y="mean log2FC", x="Promoters",
+                       fill="Time after\nactivation") +
+  theme(axis.title.x=element_blank(), axis.text.x = element_blank())
+p2b <- ggplot(ag2, aes(crowdset, log2FC, color=timePoint)) + stat_summary(position = position_dodge2(width=1)) +
+  theme_sleek() + labs(y="% upregulated\n(logFC>0.5)", x="Promoters",
+                       color="Time after\nactivation")
+
+p2 <- (p2a / p2b) + plot_layout(guides="collect") & 
+  scale_color_manual(values=pal20) & scale_fill_manual(values=pal20) & 
+  guides(fill = guide_legend(ncol = 2), color = guide_legend(ncol = 2)) 
 ```
+
+
+```{r}
+ag <- aggregate(d3[,c("log2FC","scaledLFC")], by=d3[,c("feature","timePoint","crowdset")], FUN=\(x) mean(x))
+p2a2 <- ggplot(ag, aes(crowdset, log2FC, colour=timePoint, group=timePoint)) + stat_summary(position = position_dodge2(width=1)) + theme_sleek() + 
+  labs(y="log2FC", x="Promoters", colour="Time after\nactivation") +
+  theme(axis.title.x=element_blank(), axis.text.x = element_blank())
+p2.2 <- (p2a2 / p2b) + plot_layout(guides="collect") & 
+  scale_color_manual(values=pal20) & guides(color = guide_legend(ncol = 2)) 
+
+```
+
 
 ```{r}
 d <- readRDS("../08_crowdedness/crowdedness_GR.rds")
@@ -227,14 +244,16 @@ p5 <- ggplot(d, aes(crowdset, log2FC, fill=time)) + geom_boxplot(outliers = FALS
 pdf("main_crowdedness.pdf", width=10, height=14)
 plot_grid(plot_grid(p_cwd, scale=0.95, labels="AUTO"),
   plot_grid(p_cwd_pairwise,
-            plot_grid(grid.grabExpr(draw(upset)), p_cwd_atac, nrow=2, scale=c(0.9,0.95), rel_heights = c(2,3), labels=c("C","D")),
+            plot_grid(grid.grabExpr(ComplexHeatmap::draw(upset)), 
+                      p_cwd_atac, nrow=2, scale=c(0.9,0.95), rel_heights = c(2,3),
+                      labels=c("C","D")),
             nrow=1, rel_widths = c(5,4), scale=c(0.95, 1), labels=c("B", NA)),
   plot_grid(
     plot_grid(p.pp, p1, p5, nrow=3, scale=0.95, labels=c("E","F","H")),
-    plot_grid(grid.grabExpr(draw(h)), p2, nrow=2, scale=0.95, labels=c("G","I")),
+    plot_grid(grid.grabExpr(ComplexHeatmap::draw(h)), 
+              p2.2, nrow=2, scale=0.95, labels=c("G","I")),
     nrow=1, rel_widths=c(1,3)
   ),
   nrow=3, rel_heights = c(1.5,5,7))
 dev.off()
 ```
-

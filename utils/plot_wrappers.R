@@ -26,7 +26,7 @@ doSEMplot <- function(d, vars, group.by="customClass", order.by=vars[1], nbreaks
     stat_summary(fun.data = mean_se) + 
     ggh4x::facet_grid2(cols = vars(variable), scales="free_x", independent = "x") + theme_sleek() +
     scale_color_viridis_c(trans="log1p", breaks=b) +
-    labs(x="Importance (% Shapley)", y=NULL, color="# TFs") + 
+    labs(x="Importance (% Shapley)", y=NULL, color="Number of\nCAPs") + 
     scale_x_continuous(breaks=scales::pretty_breaks(nbreaks, min.n=2))
 }
 
@@ -56,4 +56,28 @@ breakStrings <- function(x, minSizeForBreak = 20, lb = "\n"){
     substr(x, mid, mid) <- lb
     return(x)
   })
+}
+
+marginalDistributions <- function(p, x=TRUE, y=TRUE, fill="darkblue"){
+  if(x) p <- p + geom_xsidedensity(aes(y = after_stat(density)), color = NA, fill=fill)
+  if(y) p <- p + geom_ysidedensity(aes(x = after_stat(density)), color = NA, fill=fill)
+  p + theme(
+    ggside.panel.grid.major = element_blank(),
+    ggside.panel.grid.minor = element_blank(),
+    
+    ggside.axis.text.x.top     = element_blank(),
+    ggside.axis.ticks.x.top    = element_blank(),
+    ggside.axis.title.x.top    = element_blank(),
+    ggside.axis.text.x.bottom  = element_blank(),
+    ggside.axis.ticks.x.bottom = element_blank(),
+    ggside.axis.title.x.bottom = element_blank(),
+    
+    ggside.axis.text.y.right   = element_blank(),
+    ggside.axis.ticks.y.right  = element_blank(),
+    ggside.axis.title.y.right  = element_blank(),
+    ggside.axis.text.y.left    = element_blank(),
+    ggside.axis.ticks.y.left   = element_blank(),
+    ggside.axis.title.y.left   = element_blank()
+    
+    )
 }

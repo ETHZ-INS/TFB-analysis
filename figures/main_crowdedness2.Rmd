@@ -31,13 +31,18 @@ schemes <- lapply(names(schemes), \(n){
 
 # Nb 3D links in crowded vs non-crowded promoters
 
-```{r}
+```{r, fig.width=10, fig.height=3}
 d <- readRDS("../08_crowdedness/Nb_3D_links_crowded_vs_non.rds")
-p1 <- ggplot(d, aes(set, 1L+nL)) + facet_wrap(~celltype, nrow=1) + geom_violin(fill="lightblue") + 
-  stat_summary(fun.data=mean_se) + theme_sleek() + theme(axis.text.x=element_text(angle=90, vjust=0.5, hjust=1)) +
-  scale_y_log10(breaks=c(1,10^(1:3)-1), label=c(0,10^(1:3))) + #, limits=c(NA,2500)) + 
-  labs(x="Set of promoters", y="Number of PREs\nin 3D contact") + 
-   geom_signif(comparisons = list(c("crowded", "matched\nnon-crowded")), textsize = 3, tip_length=0, margin_top = 0.01)
+d$set <- factor(d$set)
+levels(d$set) <- c("crowded", "matched\nnon-\ncrowded", "non-\ncrowded")
+(p1 <- ggplot(d, aes(set, 1L+nL)) + facet_wrap(~celltype, nrow=1, scale="free_y") + 
+  geom_boxplot(fill="#B22C2C", outliers = FALSE) + 
+  theme_sleek() + theme(axis.text.x=element_text(angle=90, vjust=0.5, hjust=1)) +
+  scale_y_log10(breaks=c(1,10^(1:3)-1), label=c(0,10^(1:3)), expand=expansion(mult=c(0.02,0.1))) + 
+  labs(x=NULL, y="Number of PREs\nin 3D contact") + 
+   geom_signif(comparisons = list(c("crowded", "matched\nnon-\ncrowded")), 
+               textsize = 3, tip_length = 0))
+
 ```
 
 # do distal peaks explain promoter peaks?
@@ -51,8 +56,8 @@ res2$variable <- relevel(res2$variable, "meanMatched")
 levels(res2$variable) <- c("random PREs\nwith matched\n# peaks", "true distal\nPREs")
 
 p2 <- ggplot(res2[which(res2$crwd>=0.4),], aes(variable, 100*value)) + theme_sleek() +
-  geom_violin(fill="#00bfc4") + geom_point(size=1) + stat_summary(fun.data = mean_se, color="red") +
-  labs(y="Proportion of TFs at crowded promoters\nexplained by distal PREs",
+  geom_violin(fill="#B22C2C") + geom_point(size=1) + stat_summary(fun.data = mean_se, color="white") +
+  labs(y="Proportion of CAPs at crowded promoters\nexplained by distal PREs",
        x=NULL) + coord_flip() +
   scale_y_continuous(breaks=c(0,50,100), labels=c("0%","50%","100%"), lim=c(0,110)) +
   geom_segment(data=res1, aes(x=2, xend=1, y=100*p.true, yend=100*meanMatched), alpha=0.25) +
@@ -60,21 +65,51 @@ p2 <- ggplot(res2[which(res2$crwd>=0.4),], aes(variable, 100*value)) + theme_sle
                test.args=list(paired=TRUE, alternative="less"), margin_top=0.07, textsize = 3)
 
 p3 <- ggplot(res2[res2$crwd>0.2,], aes(100*value, variable)) + theme_sleek() + facet_wrap(~celltype) +
-  geom_violin(fill="#00bfc4") + geom_boxplot(outliers = FALSE, width=0.1) + 
-  labs(x="Proportion of TFs at promoters explained by distal PREs", y=NULL) +
+  geom_violin(fill="#B22C2C") + geom_boxplot(outliers = FALSE, width=0.1) + 
+  labs(x="Proportion of CAPs at promoters explained by distal PREs", y=NULL) +
   scale_x_continuous(breaks=c(0,50,100), labels=c("0%","50%","100%"), lim=c(0,110)) +
   geom_signif( comparisons = list(levels(res2$variable)),
                test.args=list(paired=TRUE, alternative="less"), margin_top=0.07, textsize = 3)
 ```
 
+# do crowded regions show more contacts with promoters?
 
-```{r, fig.width=10, fig.height=9.5}
-pdf("main_crowdedness2.pdf", width=10, height=9.5)
+```{r, fig.width=10, fig.height=6}
+d <- readRDS("../08_crowdedness/propPromotersInDistal.rds")
+#d <- reshape2:::melt.data.frame(d, id.vars=c("celltype", "crwd.bin"))
+
+# p4 <- ggplot(d, aes(crwd.bin, sum)) + stat_summary() + theme_sleek() + facet_wrap(~celltype, nrow=1) + labs(x=NULL, y="3D contacts\nwith promoters") +
+#   theme(axis.text.x=element_blank())
+
+(p4c <- ggplot(d, aes(crwd.bin, sum/proportion)) + stat_summary(aes(colour="All")) + 
+  stat_summary(aes(y=sum, colour="with other promoters")) + theme_sleek() +
+  scale_color_manual(values=c("#000000", "#009E73"))+
+  facet_wrap(~celltype, nrow=1, scale="free_y") + ylim(c(0,NA)) +
+    labs(x=NULL, y="\n3D contacts", colour="Type") +
+  theme(legend.position="top", axis.text.x=element_blank())) #element_text(angle=90, vjust=0.5, hjust=1)))
+p4c
+
+# p5 <- ggplot(d, aes(crwd.bin, 100*proportion)) + geom_violin(fill="#00bfc4") + stat_summary(fun = "median") + theme_sleek() + facet_wrap(~celltype, nrow=1) + labs(x="Crowdedness bin", y="% of 3D contacts\nwith promoters") +
+#   theme(axis.text.x=element_text(angle=90, vjust=0.5, hjust=1),
+#         strip.background = element_blank(), strip.text = element_blank())
+
+p5 <- ggplot(d, aes(crwd.bin, 100*meanCrwd)) + geom_boxplot(outliers = FALSE, fill="#0072B2")  +  
+  theme_sleek() + facet_wrap(~celltype, nrow=1, scale="free_y") + labs(x="Crowdedness bin", y="Mean crowdedness\nof distal contacts") +
+  theme(axis.text.x=element_text(angle=90, vjust=0.5, hjust=1), strip.background = element_blank(), strip.text = element_blank())
+
+p4c / p5
+```
+
+
+```{r, fig.width=10, fig.height=13}
+pdf("main_crowdedness2.pdf", width=10, height=13)
 plot_grid(
   plot_grid(p.schemes, labels="A", scale=0.95),
   plot_grid(p1, scale=0.95, labels="B"),
-  plot_grid(p2, p3, scale=0.95, labels=LETTERS[3:4], nrow=1, rel_widths=c(3,5)),
-  nrow=3, rel_heights=c(2.5,5,4)
+  plot_grid(p4c, labels="C", scale=0.95),
+  plot_grid(p5, labels="D", scale=0.95),
+  plot_grid(p2, p3, scale=0.95, labels=LETTERS[5:6], nrow=1, rel_widths=c(3,5)),
+  nrow=5, rel_heights=c(2,3.5,2.7,3,3.9)
 )
 dev.off()
 ```

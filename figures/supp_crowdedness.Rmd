@@ -17,7 +17,7 @@ source("../utils/load_all.R", chdir = TRUE)
 ## A
 
 ```{r}
-go <- readRDS("../09_crowdedness/GOenrichments_of_crowdedPromoters.rds")
+go <- readRDS("../08_crowdedness/GOenrichments_of_crowdedPromoters.rds")
 tt <- table(unlist(lapply(go, \(x) head(x$GO.ID,10))))
 commonTop_gsets <- names(tt)[tt>=3]
 
@@ -47,7 +47,7 @@ p.enr <- ggplot(res_top, aes(log2(Significant/Expected), breakStrings(Term),
 
 ```{r}
 anno <- readRDS("../06_meta/TF_annotation.rds")
-se <- readRDS("../09_crowdedness/TFs_cor_with_crowdedness.rds")
+se <- readRDS("../08_crowdedness/TFs_cor_with_crowdedness.rds")
 rowData(se)$pc.disorder <- anno[row.names(se), "pc.disorder"]
 rowData(se)$tot.dis.residues <- anno[row.names(se), "tot.dis.residues"]
 se <- se[rowSums(is.na(assay(se)))<=2,]
@@ -72,7 +72,7 @@ p.tfs
 ## C
 
 ```{r, fig.width=10, fig.height=5}
-res <- readRDS("../09_crowdedness/reprodScores_by_crwdBin.rds")
+res <- readRDS("../08_crowdedness/reprodScores_by_crwdBin.rds")
 # ggplot(res, aes(bin, reorder(TF, median), fill=median)) + geom_tile() + 
 #   scale_fill_viridis_c() + theme(axis.text.y=element_blank(), axis.ticks = element_blank()) + 
 #   labs(x="Crowdedness & accessibility-matched control bins", y="TFs", fill="Mean\nreproducibility")
@@ -94,7 +94,7 @@ hl <- lapply(names(ll), \(n){
   colAnn <- HeatmapAnnotation("Bin type"=titles, show_legend=isLast, show_annotation_name=FALSE,
                             col=list("Bin type"=setNames(cbbPalette[c(2,6)], levels(titles))))
   row_title <- NULL
-  if(n==names(ll)[1]) row_title <- "TFs"
+  if(n==names(ll)[1]) row_title <- "CAPs"
   grid.grabExpr(
     draw(Heatmap(ll[[n]], cluster_rows=FALSE, cluster_columns=FALSE, col=colScale, show_row_names=FALSE,
                 column_split=titles, row_title=row_title, show_heatmap_legend=isLast, name="Replicability\nScore",
@@ -111,7 +111,7 @@ p.rhm
 ## D
 
 ```{r}
-d <- readRDS("../09_crowdedness/reproducibility_by_cutnrun.rds")
+d <- readRDS("../08_crowdedness/reproducibility_by_cutnrun.rds")
 d <- d[which(d$crwd.bin!="0"),]
 d$bin.type <- ifelse(grepl("ctrl", d$crwd.bin), "Accessibility\n-matched\ncontrol", "Crowdedness\nbin")
 d$bin.type <- factor(d$bin.type, unique(d$bin.type))
@@ -122,13 +122,13 @@ p.cnr <- ggplot(d, aes(crwd.bin, value, fill=bin.type)) + geom_col(position = po
   scale_fill_manual(values=cbbPalette[c(3,7)]) + 
   theme(axis.text.x=element_text(angle=90, hjust=1, vjust=0.5)) +
   labs(y="Proportion of ChIP peaks\nreproduced by Cut&Run", fill="Bin type",
-       x="Crowdedness bin (% of assayed TFs)")
+       x="Crowdedness bin (% of assayed CAPs)")
 ```
 
 ## E
 
 ```{r}
-mo2 <- readRDS("../09_crowdedness/motifDiff_vs_dist2TSS.rds")
+mo2 <- readRDS("../08_crowdedness/motifDiff_vs_dist2TSS.rds")
 cortest <- with(mo2, cor.test(log10(meanDistToTSS), (pmax(0,crwdBound)-pmax(0,nonCrwdBound)), use="pairwise"))
 corp <- paste0("p=",format(cortest$p.value, digit=2))
 p.motif <- ggplot(mo2, aes(log10(meanDistToTSS), (pmax(0,crwdBound)-pmax(0,nonCrwdBound)), color=enr.Cscore)) +

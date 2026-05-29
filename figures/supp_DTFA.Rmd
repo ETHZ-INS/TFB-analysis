@@ -15,31 +15,29 @@ source("../utils/load_all.R", chdir = TRUE)
 ```
 
 ```{r}
+res <- readRDS("../07_DTFA/fromRNA/Nakatake2020/results.rds")
 TFlists <- readRDS("../07_DTFA/fromRNA/Nakatake2020/TFlists.rds")
+TFlists$perturbed <- intersect(TFlists$perturbed, unlist(lapply(res, \(x) names(x$allRes))))
 ```
 
 
 ```{r}
-res <- readRDS("../07_DTFA/fromRNA/Nakatake2020/results.rds")
-tt <- as.data.frame(t(sapply(res, \(x) colSums(x$summary[,1:4]))))
-tt <- tt[order(-tt$inTop10/tt$isAnnotated),]
-tt <- tt[grep("log2FC", row.names(tt)),]
-row.names(tt) <- gsub("res_log2FC_","",row.names(tt))
-sel <- c("predsReweigh.raw", "preds.raw", "collecTRI", "motifs.raw")
-tt2 <- tt[sel,]
-tt2$method <- newNames <- c("Predictions\n(re-weighed)", "Predictions\n(raw)","collecTRI", "Motifs")
-tt2$propTop10 <- tt2$inTop10/tt2$isAnnotated
-
-colors2 <- c(Motifs = "#0072B2", "Predictions\n(re-weighed)" = "#E69F00", "Predictions\n(raw)" = "#D55E00",
-             collecTRI = "#CC79A7")
-
-p1 <- ggplot(tt2, aes(reorder(method, -inTop10), inTop10, fill=method)) + geom_col() + theme_sleek() + 
-  labs(y="Number of perturbations\ndetected (in top 10)", x=NULL) +
-  ggplot(tt2, aes(reorder(method, -propTop10), propTop10, fill=method)) + geom_col() + theme_sleek() + 
-  labs(y="Proportion of annotated\nTFs detected (in top 10)", x=NULL) + plot_layout(guides="collect") &
-  scale_fill_manual(values=colors2) & theme(axis.text.x=element_text(angle=90, hjust=1, vjust=0.5)) &
-  labs(fill="Method")
+sel <- c("predsReweigh.raw", "proxReweigh.raw", "preds.raw", "collecTRI", "motifs.raw")
+newNames <- c("Predictions\n(re-weighed)+Links", "Predictions (re-weighed)\n(Promoters only)", "Predictions\n(raw)+Links","collecTRI", "Motifs+Links")
 ```
+
+
+Overlap between sets:
+
+```{r}
+cm <- make_comb_mat(TFlists)
+p1 <- UpSet(cm, row_names_gp=gpar(fontsize=11),
+            column_title="Annotated and perturbed TFs",
+            top_annotation=upset_top_annotation(m=cm, height=unit(2, "cm")))
+```
+
+Overlap between TFs identified:
+
 
 ```{r}
 identified <- lapply(res, \(x) names(which(rowSums(x$summary[,1:2])>0)))
@@ -48,35 +46,79 @@ names(identified) <- gsub("res_logCPM_","",names(identified))
 identified <- identified[sel]
 names(identified) <- newNames
 notInCollecTRI <- unique(setdiff(unlist(identified), identified$collecTRI))
+notInPreds <- unique(setdiff(identified$collecTRI, identified$Predictions))
+identified <- identified[!grepl("Promoters",names(identified))]
+identified <- c(list(Predictions=unique(unlist(identified[grep("Predictions", names(identified))]))),
+                identified[grep("collecTRI|Motifs", names(identified))])
+
+cm <- make_comb_mat(identified)
+p2 <- UpSet(cm, row_names_gp=gpar(fontsize=11),
+            column_title="TFs identified in top 10",
+            top_annotation=upset_top_annotation(m=cm, height=unit(2, "cm")))
 ```
 
+Results using log2FC instead of logCPM:
+
+
 ```{r}
-se <- readRDS("../07_DTFA/fromRNA/Nakatake2020/res_logCPM_predsReweigh.raw.fastMLM.SE.rds")
+tt <- as.data.frame(t(sapply(res, \(x) colSums(x$summary[,1:4]))))
+tt <- tt[order(-tt$inTop10/tt$isAnnotated),]
+tt <- tt[grep("log2FC", row.names(tt)),]
+row.names(tt) <- gsub("res_log2FC_","",row.names(tt))
+tt2 <- tt[sel,]
+tt2$method <- newNames
+tt2$method2 <- gsub("\n(Promoters only)","",tt2$method, fixed=TRUE)
+tt2$method2 <- gsub(" ","\n",gsub("+Links","",tt2$method2, fixed=TRUE),fixed=TRUE)
+tt2$propTop10 <- tt2$inTop10/tt2$isAnnotated
+tt2$promoter <- grepl("Promoters", tt2$method)
+
+colors2 <- c(Motifs = "#0072B2", "Predictions\n(re-weighed)" = "#E69F00", "Predictions\n(raw)" = "#D55E00",
+             collecTRI = "#CC79A7")
+
+tt3 <- tt2
+tt3$inTop10 <- tt3$propTop10
+tt3 <- dplyr::bind_rows(list("Number of perturbations\ndetected (in top 10)"=tt2,
+                             "Proportion of annotated\nTFs detected (in top 10)"=tt3), .id="type")
+
+p3 <- ggplot(tt3, aes(reorder(method, -inTop10), inTop10, fill=method2, color=promoter)) + 
+  geom_col(linetype="dashed") + facet_grid(rows="type", scale="free_y", switch="y") + theme_sleek() + 
+  theme(strip.placement = "outside") + labs(x=NULL, y=NULL, fill="Method") +
+  scale_color_manual(values=c("FALSE"=NA, "TRUE"="grey40"), guide="none") +
+  scale_fill_manual(values=colors2) +
+  theme(axis.text.x=element_text(angle=90, hjust=1, vjust=0.5))
+```
+
+
+```{r}
+se <- readRDS("../07_DTFA/fromRNA/Nakatake2020/res_logCPM_preds.raw.fastMLM.SE.rds")
 se2 <- readRDS("../07_DTFA/fromRNA/Nakatake2020/res_logCPM_collecTRI.fastMLM.SE.rds")
 se <- log2FC(se, fromAssay = "a", controls=se$condition=="Control")
 se2 <- log2FC(se2, fromAssay = "a", controls=se$condition=="Control")
-d <- meltSE(se, intersect(notInCollecTRI, TFlists$collecTRI))
+d <- meltSE(se, c(notInCollecTRI, notInPreds))
 d <- d[which(d$feature == d$perturbation),]
-d2 <- meltSE(se2, intersect(notInCollecTRI, TFlists$collecTRI))
+d2 <- meltSE(se2, c(notInCollecTRI, notInPreds))
 d2 <- d2[which(d2$feature == d2$perturbation),]
 d2$method <- "collecTRI"
 d$method <- "Predictions\n(re-weighed)"
 dm <- rbind(d[which(d$condition!="Control"),colnames(d2)],d2[which(d2$condition!="Control"),])
+dm$type <- ifelse(dm$feature %in% notInPreds, "Poorly detected with predictions", "Poorly detected with collecTRI")
 
 cols <- c("Predictions\n(re-weighed)" = "#E69F00", collecTRI = "#CC79A7")
 
-sel <- c("CEBPB", "EGR1", "ELK1", "REST", "USF1")
+sel <- c("CEBPB", "EGR1", "ELK1", "REST")
 
-p3 <- ggplot(dm[which(dm$feature %in% sel),], aes(feature, log2FC, fill=method, color=method)) + 
-    geom_boxplot() + theme_sleek() + theme(axis.text.x=element_text(angle=90, hjust=1, vjust=0.5)) +
-    geom_hline(yintercept=0, linetype="dashed") + 
+p4 <- ggplot(dm, aes(feature, log2FC, fill=method, color=method)) + 
+    geom_boxplot() + theme_sleek() + geom_hline(yintercept=0, linetype="dashed") + 
+  theme(axis.text.x=element_text(angle=90, hjust=1, vjust=0.5), legend.position="bottom") +
+  facet_wrap(~type, scales="free_x") + 
   scale_color_manual(values=cols) + scale_fill_manual(values=cols) +
-    labs(subtitle="Example perturbations poorly detected by collecTRI, despite a regulon defined for the TF",
-         x="Perturbed TF")
+    labs(x="Perturbed TF", y="log2(foldchange) in inferred TF activity")
 ```
 
-```{r, fig.width=9, fig.height=8}
-pdf("supp_DTFA.pdf", width=9, height=8)
-plot_grid( p2, p3, nrow=2, scale=0.95, labels="AUTO") 
+```{r, fig.width=9, fig.height=10}
+pdf("supp_DTFA.pdf", width=9, height=10)
+plot_grid( plot_grid( plot_grid(grid.grabExpr(draw(p1)), grid.grabExpr(draw(p2)), nrow=2, labels=c("A","C"), scale=0.9),
+                      p3, rel_widths=c(2,3), labels=c(NA, "B"), scale=0.95),
+           p4, nrow=2, rel_heights =  c(6,5), labels=c(NA, "D"), scale=c(1,0.95))
 dev.off()
 ```

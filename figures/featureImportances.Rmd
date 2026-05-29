@@ -9,6 +9,7 @@ suppressPackageStartupMessages({
   library(ggsignif)
   library(cowplot)
   library(patchwork)
+  library(data.table)
   library(SummarizedExperiment)
 })
 source("../utils/load_all.R", chdir=TRUE)
@@ -42,23 +43,23 @@ meta$adjComplexity <- meta$logComplexity-predict(mod, meta)
 meta$BindingMode <- factor(meta$Binding.mode)
 levels(meta$BindingMode) <- c("Monomer or\nhomomultimer", "Obligate\nheteromer", NA)
 p_heteromer_cofactors <- ggplot(meta[!is.na(meta$Binding.mode),], aes(BindingMode, Cofactors)) + xlab("Binding mode") +
-  geom_violin(fill="#00bfc4") + stat_summary(fun.data = mean_se) + theme_sleek() + coord_cartesian(ylim=c(0,70)) + 
+  geom_violin(fill="#0F6B99") + stat_summary(fun.data = mean_se) + theme_sleek() + coord_cartesian(ylim=c(0,70)) + 
   ylab("Importance of cofactors\n(% Shapley)") + geom_signif(comparisons = list(levels(meta$BindingMode)), textsize = 3)
 
 meta$hasIDR <- factor(meta$pc.disorder>0, c(F,T), c("without","with"))
 p_IDR_cofactors <- ggplot(meta[!is.na(meta$pc.disorder),], aes(hasIDR, Cofactors)) + xlab("Intrinsically-disordered\ndomain") +
-    geom_violin(fill="#00bfc4") + stat_summary(fun.data = mean_se) + theme_sleek() + coord_cartesian(ylim=c(0,70)) + 
+    geom_violin(fill="#0F6B99") + stat_summary(fun.data = mean_se) + theme_sleek() + coord_cartesian(ylim=c(0,70)) + 
     geom_signif(comparisons = list(levels(meta$hasIDR)), textsize = 3)
 
 meta$effector <- factor(meta$effector)
 p_effector_cofactors <- ggplot(meta[!is.na(meta$effector),], aes(effector, Cofactors)) + 
-  geom_violin(fill="#00bfc4") + stat_summary(fun.data = mean_se) + theme_sleek() + xlab("Effector domain(s)") +
+  geom_violin(fill="#0F6B99") + stat_summary(fun.data = mean_se) + theme_sleek() + xlab("Effector domain(s)") +
   ylab("Importance of cofactors\n(% Shapley)") + coord_cartesian(ylim=c(0,70)) + 
   geom_signif(comparisons = list(levels(meta$effector)[c(1,3)]), textsize = 3)
 
 meta$isPioneer <- factor(meta$ChromatinOpeningType=="pioneer", c(TRUE, FALSE), c("pioneer", "others"))
 p_pioneer_cofactors <- ggplot(meta[!is.na(meta$isPioneer),], aes(isPioneer, Cofactors)) + xlab("Chromatin opening") +
-    geom_violin(fill="#00bfc4") + stat_summary(fun.data = mean_se) + theme_sleek() +  coord_cartesian(ylim=c(0,70)) +
+    geom_violin(fill="#0F6B99") + stat_summary(fun.data = mean_se) + theme_sleek() +  coord_cartesian(ylim=c(0,70)) +
     ylab("Importance of cofactors\n(% Shapley)") + geom_signif(comparisons = list(levels(meta$isPioneer)), textsize = 3)
 ```
 
@@ -71,7 +72,7 @@ meta[["% disorder"]] <- meta$pc.disorder
 semPlot2 <- function(meta, by="customClass", tag=NULL){
   (doSEMplot(meta, order.by = "Cofactors", group.by=by, vars = c("Cofactors", "ATAC", "Sequence", "TFmotif")) + labs(tag=tag, subtitle="Sets of predictive features")) +
   (doSEMplot(meta, order.by = "Cofactors", group.by=by, vars = c("Complexity")) + labs(x="Value", subtitle="Model") + theme(axis.text.y=element_blank(), axis.ticks.y=element_blank())) +
-doSEMplot(meta, order.by = "Cofactors", group.by=by, vars = c("motifIC", "nVICE", "% disorder")) + labs(x="Value", subtitle="TF characteristics") + scale_x_continuous(n.breaks=3) +
+doSEMplot(meta, order.by = "Cofactors", group.by=by, vars = c("motifIC", "nVICE", "% disorder")) + labs(x="Value", subtitle="CAP characteristics") + scale_x_continuous(n.breaks=3) +
   theme(axis.text.y=element_blank(), axis.ticks.y=element_blank()) + plot_layout(guides="collect", widths=c(4,1,3))
 }
 
@@ -98,7 +99,7 @@ p_cof1 <- ggplot(co2, aes(rank(-meanPosShap),meanPosShap,label=cofactor)) + geom
 We'd expect HTH and forkhead factors to have the highest sequence-dependence.
 
 
-```{r, fig.width=10, fig.height=11}
+```{r, fig.width=10, fig.height=11, eval=TRUE}
 p_cof <- (p_heteromer_cofactors + labs(tag="A")) + (p_pioneer_cofactors + labs(tag="B")) + (p_IDR_cofactors + labs(tag="C")) + (p_effector_cofactors + labs(tag="D")) + plot_layout(nrow=1)
 pdf("featureImportances.pdf", width=10, height=11)
 plot_grid(
@@ -110,4 +111,3 @@ plot_grid(
 )
 dev.off()
 ```
-

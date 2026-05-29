@@ -10,7 +10,8 @@ suppressPackageStartupMessages({
   library(patchwork)
   library(GenomicRanges)
   library(pdftools)
-  source("../utils/plot_theme.R")
+  library(ggside)
+  source("../utils/load_all.R", chdir=TRUE)
 })
 subTitleSize <- 10
 ```
@@ -30,8 +31,8 @@ p1 <- ggplot(data.frame(width=width(PREs)), aes(width)) + geom_histogram(fill=si
   theme(plot.subtitle=element_text(size=subTitleSize))
 
 p2 <- ggplot(pip, aes(100*prop)) + geom_histogram(fill=tfContextColors[1], boundary=0, closed="right") + theme_bw() + 
-  labs(x="% of peaks within PREs", y="Number of TF/celltype",
-       subtitle=paste0("Across 3811 ENCODE ChIP-seq\nfor ", length(unique(pip$TF)), " TFs")) +
+  labs(x="% of peaks within PREs", y="Number of CAPs/celltype",
+       subtitle=paste0("Across 3811 ENCODE ChIP-seq\nfor ", length(unique(pip$TF)), " CAPs")) +
   xlim(50,100) + 
   annotate("text", x=50, y=950, vjust=1, hjust=0,
            label=paste0("99.8% of all peaks\n are in PREs"))+
@@ -51,10 +52,10 @@ chipDt <- subset(chipDt, context %in% atacDt$rn)
 anno <- chipDt[,.(n_con=length(unique(context))), by=tfName]
 
 sub <- paste0(">12k ATAC-matched ChIP experiments:\n", length(unique(chipDt$tfName)), 
-              " TFs across ", length(unique(chipDt$context)), " cellular contexts")
+              " CAPs across ", length(unique(chipDt$context)), " cellular contexts")
 
 p3 <- ggplot(anno, aes(x=n_con)) + geom_histogram(fill=tfContextColors[1], center=1, bins=32) + theme_bw() + 
-    labs(x="Number of cellular contexts", y="Number of TFs", subtitle=sub) + scale_x_sqrt(breaks=c(1,5,15,60,150)) +
+    labs(x="Number of cellular contexts", y="Number of CAPs", subtitle=sub) + scale_x_sqrt(breaks=c(1,5,15,60,150)) +
   ggrepel::geom_text_repel(data=subset(anno, tfName=="CTCF"),
                            aes(label=tfName, y=1), min.segment.length=0, nudge_x = -1, nudge_y = 50)+
   theme_sleek()+
@@ -63,18 +64,26 @@ p3 <- ggplot(anno, aes(x=n_con)) + geom_histogram(fill=tfContextColors[1], cente
 
 ```{r}
 res <- readRDS("../06_meta/motif_chip_overlaps.rds")
-res2 <- res[res$chipThreshold==50 & res$motifLength<40,]
+tfs <- readRDS("../06_meta/TF_annotation.rds")
+tfs <- row.names(tfs)[which(tfs$isLambertTf)]
+res2 <- res[res$tf %in% tfs & res$chipThreshold==50 & res$motifLength<40,]
 res2$motifThreshold <- factor(res2$motifThreshold)
 levels(res2$motifThreshold) <- c("Lenient matching (p<0.001)", "Default matching (p<5e-5)")
 p4 <- ggplot(res2[order(res2$motifIC),], aes(both/chip, both/motif, colour=pmin(35,motifIC))) +
   geom_point() + facet_wrap(~motifThreshold) + scale_y_sqrt() + theme_bw() +
   scale_color_viridis_c(breaks=c(5,35)) + 
-  labs(x="Proportion of peaks (in PREs) that have the motif", color="Motif\ntotal IC",
-       y="Proportion of motif matches\n(in PREs) that have a peak",
+  labs(x="Sensitivity, i.e. proportion of peaks (in PREs) that have the motif", color="Motif\ntotal IC",
+       y="Specificity, i.e. the\nproportion of motif matches\n(in PREs) that have a peak",
        subtitle="Not only are most motif matches not bound, but for most TFs a large fraction of peaks fail to show a clear motif")+
   theme_sleek()+
   theme(plot.subtitle=element_text(size=subTitleSize))
-p4
+
+# roughly which(res2$both/res2$chip > 0.98 | res2$both/res2$motif>0.2 | (res2$both/res2$chip > 0.98 & as.integer(res2$motifThreshold)==2L) )
+tfs <- strsplit("KDM2A, MAX, ZNF761, HMGA1, GRHL2, ZBTB38, FOSL2, NFKB1, YY1, NRF1, ATF2, ZNF131, CGGBP1, MCM3, NFIX, HLF, RLF, ZNF384",", ")[[1]]
+
+p4 <- marginalDistributions(p4) + 
+  ggrepel::geom_text_repel(data=res2[res2$tf %in% tfs,], aes(label=tf),
+                           color="black", size=2.5, min.segment.length=0)
 ```
 
 ```{r, fig.width=10, fig.height=6}
@@ -93,8 +102,7 @@ plot_grid(
   plot_grid(p1, p2, p3, nrow=1, labels="AUTO", scale=0.95),
   plot_grid(p4, labels="D", scale=0.95),
   plot_grid(scheme, labels="E"),
-  nrow=3, rel_heights=c(3,4,4)
+  nrow=3, rel_heights=c(3,4.6,3.4)
 )
 dev.off()
 ```
-

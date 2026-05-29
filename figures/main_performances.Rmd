@@ -38,6 +38,7 @@ load(file="../06_meta/performances.RData", verbose=TRUE)
 Overfitting:
 
 ```{r}
+print(length(unique(anno$TF)))
 ofp <- ggplot(anno, aes(trainAUC.trainChr, trainAUC.valChr)) + geom_abline(slope=1)+ 
     geom_point(size=1, alpha=0.5) + theme_sleek() + labs(x="AUPRC train chr", 
                                                          y="AUPRC held-out chr")+
@@ -73,6 +74,7 @@ mTf[,nTrainContexts_plot:=fifelse(nTrainContexts_plot>=7, ">=7", as.character(nT
 mTf[,nTrainContexts_plot:=factor(nTrainContexts_plot, 
                                levels=c(as.character(1:6), ">=7"), 
                                ordered=TRUE)]
+print(length(unique(mTf$TF)))
 pnC <- ggplot(mTf, aes(nTrainContexts_plot, auc_pr_mod.test, 
                      group=nTrainContexts_plot,
                      fill=nTrainContexts_plot)) + 
@@ -97,6 +99,7 @@ names(blues) <- c("1", "2", "3+")
 shapes <- c(16,17,15)
 names(shapes) <- names(blues)
 
+print(length(unique(mTf$TF)))
 pcor <- ggplot(mTf, aes(pos_frac.test, auc_pr_mod.test, shape=train.nC2, color=train.nC2)) + 
     geom_abline(slope=1, color="#00bfc4", linetype="dashed") + geom_point(size=2) + 
     theme_sleek()+
@@ -146,7 +149,7 @@ corsDt <- data.table(spearman_cor=unlist(cors),
                      var=vars, 
                      var_name=c("Sqrt proportion of\npositives held-out", 
                                 "Sqrt proportion of\npositives train",
-                                "Sqrt proportion of\nheld-dout context peaks\nin train contexts", 
+                                "Sqrt proportion of\nheld-out context peaks\nin train contexts", 
                                 "Sqrt proportion of\ntrain context peaks\nin held−out contexts",
                                 "Sqrt number of\ntraining positives",
                                 "Number of\ntraining contexts"))
@@ -215,7 +218,7 @@ corsDt <- data.table(spearman_cor=unlist(cors),
                      var=vars, 
                      var_name=c("Sqrt proportion of\npositives held-out", 
                                 "Sqrt proportion of\npositives train",
-                                "Sqrt proportion of\nheld-dout context peaks\nin train contexts", 
+                                "Sqrt proportion of\nheld-out context peaks\nin train contexts", 
                                 "Sqrt proportion of\ntrain context peaks\nin held−out contexts",
                                 "Sqrt number of\ntraining positives",
                                 "Number of\ntraining contexts",
@@ -257,12 +260,21 @@ pcor.gen <- ggplot(subset(coDt, var!="intercept"),
 
 ```{r}
 meta <- readRDS("../06_meta/shap_by_meta.SE.rds")
+meta <- meta[,colData(meta)$TF %in% anno$TF]
 meta <- cbind(as.data.frame(colData(meta)), t(assay(meta)))
 meta <- meta[!is.na(meta$ATAC),]
 cofactors <- readRDS("../06_meta/shap_cofactors.rds")
+cofactors <- subset(cofactors, TF %in% anno$TF)
 hp <- readRDS("../06_meta/hyperparams.rds")
+hp <- subset(hp, TF %in% anno$TF)
+
 hp <- hp[which(hp$model=="full_model"),]
 ag <- aggregate(hp[,grep("learning|lambda|num_|min_gain|_fraction|sum_|complexity", colnames(hp))], by=hp[,"TF",drop=FALSE], FUN=mean)
+
+# TODO: adapt to complexity defintion of xgboost paper
+
+
+
 meta <- merge(meta, ag, by="TF")
 meta$Complexity <- meta$tree_complexity
 meta$logComplexity <- log1p(meta$Complexity)
@@ -289,10 +301,15 @@ ggsave("supplementary_perf_test.pdf",
 Enrichment over random:
 
 ```{r}
+print(length(unique(mTf$TF)))
 penr1 <- ggplot(mTf, aes(x=auc_pr_mod.test, y=log2(enrichment.test), shape=train.nC2, color=(pos_frac.test))) + 
     geom_point(size=2) + theme_sleek() + geom_hline(yintercept = median(log2(mTf$enrichment.test))) +
-  scale_color_viridis_c(trans="sqrt",
-                        breaks = scales::breaks_pretty(n = 4))+
+  scale_color_viridis_c(trans="sqrt", 
+                        guide = guide_colorbar(order=1,
+                              direction="horizontal",
+                              barheight = unit(3, "mm"),
+                              barwidth = unit(40, "mm")),
+                        breaks = c(0.001,0.02,0.05)) + #scales::breaks_pretty(n = 4))+
   scale_x_sqrt()+
   labs(x="AUPRC held-out context\n", y="log2(enrichment) over random",
        color="Proportion positives", shape="Number of\ntraining\ncontexts")+
@@ -300,14 +317,10 @@ penr1 <- ggplot(mTf, aes(x=auc_pr_mod.test, y=log2(enrichment.test), shape=train
         legend.title.position="top",
         legend.text = element_text(size=8),
         legend.title= element_text(size=9,face="plain"))+
-  guides(shape="none",
-         color=guide_colorbar(order=1,
-                              direction="horizontal",
-                              barheight = unit(3, "mm"),
-                              barwidth = unit(40, "mm")))+
+  guides(shape="none")+
   tight
 
-
+print(length(unique(mTf$TF)))
 penr2 <- ggplot(mTf, aes(x=pos_frac.test, y=log2(mTf$enrichment.test), shape=train.nC2, color=(auc_pr_mod.test))) + 
     geom_point(size=2) + theme_sleek() + 
   geom_hline(yintercept = median(log2(mTf$enrichment.test)), linetype="dashed", 
@@ -325,14 +338,15 @@ penr2 <- ggplot(mTf, aes(x=pos_frac.test, y=log2(mTf$enrichment.test), shape=tra
 ```
 
 ```{r, frac shared peaks}
-pTrain <- ggplot(mTf, aes(x=frac_shared_peaks_test, 
+print(length(unique(mTf$TF)))
+pTrain <- ggplot(mTf[!is.na(mTf$auc_pr_mod.test),], aes(x=frac_shared_peaks_test, 
                         y=log2(enrichment.test), 
                         shape=train.nC2, 
                         color=(auc_pr_mod.test))) + 
     geom_point(size=2) + theme_sleek() + 
   geom_hline(yintercept = median(log2(mTf$enrichment.test)), color="black") +
   geom_smooth(aes(group=1), method=MASS::rlm, linewidth=1.5, color="darkblue") +
-  scale_color_viridis_c(trans="sqrt", option="B") +
+  scale_color_viridis_c(trans="sqrt", option="B", breaks=c(0.01,0.15,0.45,0.8)) +
   scale_x_sqrt() + 
   labs(x="Proportion of held-out context peaks\nin train contexts", 
        y="log2(enrichment) over random",
@@ -365,9 +379,11 @@ fit <- lm(log2enrDiff~sqrt(frac_shared_peaks_test), data=mTf[w,])
 maxRes$plot_pred <- predict(fit, newdata=maxRes)
 maxRes[,plot_res:=log2enrDiff-plot_pred]
 maxRes[,plot_mid:=(log2enrDiff+plot_pred)/2]
+
+print(length(unique(mTf$TF)))
 pdist1 <- ggplot(mTf, aes(frac_shared_peaks_test, log2enrDiff)) + theme_sleek() + 
     geom_point(aes(shape=train.nC2, color=frac_shared_peaks_train), size=2, alpha=0.7) + 
-    scale_color_viridis_c(option="A", trans="sqrt")+scale_x_sqrt()+
+    scale_color_viridis_c(option="A", trans="sqrt", breaks=c(0,0.1,0.4,0.8))+scale_x_sqrt()+
     geom_segment(aes(x = 0, xend = 1,
                    y = coef(fit)[[1]] + coef(fit)[[2]]*0,
                    yend = coef(fit)[[1]] + coef(fit)[[2]]*1),
@@ -382,14 +398,14 @@ pdist1 <- ggplot(mTf, aes(frac_shared_peaks_test, log2enrDiff)) + theme_sleek() 
                  linewidth = 1)+
     annotate("segment",
              x=0.6, 
-             y=12,
+             y=15,
              xend=0.8,      
-             yend=12,
+             yend=15,
              linewidth=1,
              color="darkgoldenrod2") +
     annotate("text",
-             x=0.15, 
-             y=11.5,
+             x=0.2, 
+             y=14.5,
              color="black",
              size=3,
              label = "Generalizability", hjust = 0, vjust = 0) +
@@ -408,27 +424,27 @@ pdist1 <- ggplot(mTf, aes(frac_shared_peaks_test, log2enrDiff)) + theme_sleek() 
                                    barwidth = unit(40, "mm")))+
   tight
 pdist1
-
-library(latex2exp)
-pdist2 <- ggplot(mTf[w,], aes(frac_shared_peaks_train, log2(enrichment.test/enrichment.train))) + theme_sleek() + 
-     geom_point(aes(shape=train.nC2, color=frac_shared_peaks_test), size=2) + 
-     scale_color_viridis_c(option="A", trans="sqrt") + scale_x_sqrt() +
-     geom_smooth(aes(group=1), method=MASS::rlm, linewidth=1.5, color="darkblue")+
-     #annotate("text", x=0.6, y=Inf, label=dpv1, hjust=1.2, vjust=2) + 
-     labs(color=TeX("$|\\frac{hp \\cap tp|}{|hp|}$", bold=TRUE), #x="Mean ATAC distance from training contexts",
-          y="held-out train difference\nin log2(enrichment) over random",
-          x=TeX("$|hp \\cap tp|/|tp|$", bold=TRUE), 
-          shape="Number of\ntraining\ncontexts")+
-     theme(legend.position="top",
-           legend.title.position = "right",
-           legend.text = element_text(size=8),
-           legend.title= element_text(size=9, face="plain"))+
-     guides(shape = "none",
-            color = guide_colorbar(barheight = unit(3, "mm"), 
-                                   direction="horizontal",
-                                   barwidth = unit(40, "mm")))+
-  tight
-pdist2
+# 
+# library(latex2exp)
+# pdist2 <- ggplot(mTf[w,], aes(frac_shared_peaks_train, log2(enrichment.test/enrichment.train))) + theme_sleek() + 
+#      geom_point(aes(shape=train.nC2, color=frac_shared_peaks_test), size=2) + 
+#      scale_color_viridis_c(option="A", trans="sqrt") + scale_x_sqrt() +
+#      geom_smooth(aes(group=1), method=MASS::rlm, linewidth=1.5, color="darkblue")+
+#      #annotate("text", x=0.6, y=Inf, label=dpv1, hjust=1.2, vjust=2) + 
+#      labs(color=TeX("$|\\frac{hp \\cap tp|}{|hp|}$", bold=TRUE), #x="Mean ATAC distance from training contexts",
+#           y="held-out train difference\nin log2(enrichment) over random",
+#           x=TeX("$|hp \\cap tp|/|tp|$", bold=TRUE), 
+#           shape="Number of\ntraining\ncontexts")+
+#      theme(legend.position="top",
+#            legend.title.position = "right",
+#            legend.text = element_text(size=8),
+#            legend.title= element_text(size=9, face="plain"))+
+#      guides(shape = "none",
+#             color = guide_colorbar(barheight = unit(3, "mm"), 
+#                                    direction="horizontal",
+#                                    barwidth = unit(40, "mm")))+
+#   tight
+# pdist2
 ```
 
 ```{r, peak set scheme, eval=TRUE}
@@ -500,6 +516,7 @@ for(i in 1:nrow(unCombs)){
  }
 }
 predAnnotDt <- rbindlist(predAnnotDt)
+predAnnotDt <- subset(predAnnotDt, tfName %in% anno$TF)
 
 predAnnotDt[,in_train:=fifelse(is_train_peak>0, "peak in train", "peak not in train")]
 p.box.sets <- ggplot(predAnnotDt, 
@@ -531,6 +548,8 @@ tight
 ```{r}
 # Proportion of train context peaks in held-out context
 # Proportion of held-out context peaks in train context
+
+print(length(unique(mTf$TF)))
 p.fracs <- ggplot(mTf, aes(y=frac_shared_peaks_test, 
                   x=frac_shared_peaks_train,
                   color=log2(enrichment.test)))+
@@ -587,7 +606,7 @@ scale_colour_manual(values = c("TRUE"="black",
                                "FALSE"="white"), guide = "none") +
 labs(x=TeX("$|hp \\cap \\, tp|/|tp|$", bold=TRUE),
      y=TeX("$|hp \\cap \\, tp|/|hp|$", bold=TRUE),
-     fill="Number of TF x context combinations")+
+     fill="Number of CAP x context combinations")+
 scale_fill_viridis_c(option="E")+
 scale_x_discrete(guide = guide_axis(n.dodge=2))+
 theme_sleek()+
@@ -721,9 +740,6 @@ newNames <- c("sqrt(proportion\nof positives)", "final\nAUPRC", "log2(enrichment
 
 
 
-
-
-
 Stat summary across TF classes:
 
 ```{r, fig.width=10, fig.height=4}
@@ -731,7 +747,7 @@ gse <- doSEMplot(e2, vars=setNames(vars, newNames), order.by = vars[1]) +
   theme(axis.title.x=element_blank()) + scale_color_viridis_c(breaks=c(18,100,406), trans="log2") +
    theme(axis.text.x=element_text(size=9, angle=90, hjust=1, vjust=0.5),
          legend.title= element_text(size=9, face="plain"))+
-   labs(color="Number of\nTFs", x="Metric value")+
+   labs(color="Number of\nCAPs", x="Metric value")+
    guides(color = guide_colorbar(barwidth = unit(3, "mm"), 
                                  direction="vertical",
                                  barheight = unit(40, "mm")))+
@@ -778,6 +794,15 @@ pbottom <- free(gse+labs(tags="G"))+
            perf.cScore+labs(tags="H")+
            plot_layout(widths=c(2,1))
 plot_grid(ptop, pmid, pbottom, nrow=3, rel_heights=c(1,1.2,1.2))
+dev.off()
+```
+
+```{r, main perf simplified, eval=FALSE}
+pdf("main_performances.pdf", width=12, height=4)
+free(ofp+labs(tags="A"))+
+free(pnC+labs(tags="B"))+
+free(pTrain+labs(tags="C", x="Proportion of non-cell-type-specific peaks"))+
+plot_layout(widths=c(1,1,1))
 dev.off()
 ```
 

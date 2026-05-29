@@ -46,7 +46,7 @@ p.enr <- ggplot(res_top, aes(log2(Significant/Expected), breakStrings(Term),
 ## B
 
 ```{r}
-anno <- readRDS("../06_meta/TF_annotation.rds")
+anno <- readRDS("../06_TF_meta/TF_annotation.rds")
 se <- readRDS("../08_crowdedness/TFs_cor_with_crowdedness.rds")
 rowData(se)$pc.disorder <- anno[row.names(se), "pc.disorder"]
 rowData(se)$tot.dis.residues <- anno[row.names(se), "tot.dis.residues"]

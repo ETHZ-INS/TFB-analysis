@@ -175,7 +175,7 @@ p2 <- ggplot(d2, aes(`crowded\nbound sites`, `non-crowded\nbound sites`, color=1
 
 
 ```{r, eval=FALSE}
-anno <- readRDS("../06_meta/TF_annotation.rds")
+anno <- readRDS("../06_TF_meta/TF_annotation.rds")
 d3 <- merge(d2, anno, by="row.names")
 d3$diff <- d3$`non-crowded\nbound sites`-d3$`crowded\nbound sites`
 d3$nNonDBD <- lengths(strsplit(d3[["Non_DNA_binding Domains"]], ";", fixed=TRUE))

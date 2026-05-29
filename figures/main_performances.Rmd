@@ -30,9 +30,9 @@ tight <- theme(panel.spacing=unit(6, "pt"),
 
 
 ```{r}
-anno <- readRDS("../06_meta/TF_annotation.rds")
+anno <- readRDS("../06_TF_meta/TF_annotation.rds")
 anno <- anno[!is.na(anno$meanFinalAUPRC),]
-load(file="../06_meta/performances.RData", verbose=TRUE)
+load(file="../06_TF_meta/performances.RData", verbose=TRUE)
 ```
 
 Overfitting:
@@ -259,13 +259,13 @@ pcor.gen <- ggplot(subset(coDt, var!="intercept"),
 
 
 ```{r}
-meta <- readRDS("../06_meta/shap_by_meta.SE.rds")
+meta <- readRDS("../06_TF_meta/shap_by_meta.SE.rds")
 meta <- meta[,colData(meta)$TF %in% anno$TF]
 meta <- cbind(as.data.frame(colData(meta)), t(assay(meta)))
 meta <- meta[!is.na(meta$ATAC),]
-cofactors <- readRDS("../06_meta/shap_cofactors.rds")
+cofactors <- readRDS("../06_TF_meta/shap_cofactors.rds")
 cofactors <- subset(cofactors, TF %in% anno$TF)
-hp <- readRDS("../06_meta/hyperparams.rds")
+hp <- readRDS("../06_TF_meta/hyperparams.rds")
 hp <- subset(hp, TF %in% anno$TF)
 
 hp <- hp[which(hp$model=="full_model"),]

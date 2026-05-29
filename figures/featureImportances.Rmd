@@ -17,16 +17,16 @@ source("../utils/load_all.R", chdir=TRUE)
 
 
 ```{r}
-meta <- readRDS("../06_meta/shap_by_meta.SE.rds")
+meta <- readRDS("../06_TF_meta/shap_by_meta.SE.rds")
 meta <- cbind(as.data.frame(colData(meta)), t(assay(meta)))
 meta <- meta[!is.na(meta$ATAC),]
-cofactors <- readRDS("../06_meta/shap_cofactors.rds")
+cofactors <- readRDS("../06_TF_meta/shap_cofactors.rds")
 ```
 
 Hyper-parameters
 
 ```{r}
-hp <- readRDS("../06_meta/hyperparams.rds")
+hp <- readRDS("../06_TF_meta/hyperparams.rds")
 hp <- hp[which(hp$model=="full_model"),]
 ag <- aggregate(hp[,grep("learning|lambda|num_|min_gain|_fraction|sum_|complexity", colnames(hp))], by=hp[,"TF",drop=FALSE], FUN=mean)
 meta <- merge(meta, ag, by="TF")

@@ -73,7 +73,7 @@ write.table(suppTable1,
 
 ```{r, supplementary table 2 - aggregated data}
 metaMerged <- readRDS("../data/05_maeAll_meta.rds")
-anno <- readRDS("../06_meta/TF_annotation.rds")
+anno <- readRDS("../06_TF_meta/TF_annotation.rds")
 anno <- as.data.table(anno, keep.rownames=TRUE)
 setnames(anno, "rn", "tf_name")
 

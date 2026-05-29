@@ -136,9 +136,11 @@ subsets <- c(spw$crowded, bg.mid, bg.nC, bg.unbound)
 
 d <- meltSE(se, subsets)
 ggplot(d, aes(timePoint, log2FC, group=sample)) + stat_summary() + theme_bw() + facet_wrap(~crowdset)
+saveRDS(d, file="crowdedness_GR_rna.rds")
 
 ag <- aggregate(d[,c("log2FC","scaledLFC")], by=d[,c("sample","timePoint","crowdset")], FUN=\(x) mean(x))
 p1 <- ggplot(ag, aes(crowdset, log2FC, color=timePoint, fill=timePoint)) + geom_boxplot(outliers = FALSE) + theme_bw() + ylab("log2FC")
+
 ```
 
 
@@ -169,9 +171,9 @@ degs <- sapply(deas, \(x){
 Crowded promoters upregulated very early include Dusp1 and ZFP36
 
 
-Unspliced:
+Unspliced: (NOT USED IN THE END)
 
-```{r}
+```{r, eval=FALSE}
 se <- readRDS("/mnt/gapp/externData/Reddy_GR_ATAC_K27ac_Dnase/RNAseq2/SE.split.rds")
 tmp <- read.delim("/mnt/gapp/externData/Reddy_GR_ATAC_K27ac_Dnase/RNAseq2/unspliced.tmp.counts", skip=1)
 rowRanges(se) <- GRanges(gsub(";.+","",tmp$Chr), strand=gsub(";.+","",tmp$Strand),
@@ -313,13 +315,5 @@ ag <- aggregate(d[,c("logcpm","log2FC","scaledLFC")], by=d[,c("sample","time","c
 #saveRDS(ag[which(ag$signal != "H3K27ac" & ag$time!="4h"),], file="crowdedness_GR.rds")
 
 ggplot(ag, aes(crowdset, log2FC, color=time, fill=time)) + geom_boxplot(outliers = FALSE) + theme_bw()
-```
-
-
-## Others
-
-```{r}
-e <- fread("GSE117940_ATAC-seq_peaks.tsv.gz")
-se <- SummarizedExperiment(list(counts=as.matrix(e[,13:18])), rowRanges=makeGRangesFromDataFrame(e[,1:3]))
 ```
 

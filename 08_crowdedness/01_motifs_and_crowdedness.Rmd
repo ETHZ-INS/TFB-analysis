@@ -114,6 +114,7 @@ db <- reshape::cast(db, context+TF~set, value = "mean")
 m <- merge(dat2[grep("atac|crowdedness", dat2$set, invert=TRUE),], db, by=c("context","TF"))
 m$set <- factor(m$set, unique(m$set))
 saveRDS(m, file="motifScores_in_crowded_vs_bound_V3.rds")
+#m <- readRDS("motifScores_in_crowded_vs_bound_V3.rds")
 ```
 
 ```{r}

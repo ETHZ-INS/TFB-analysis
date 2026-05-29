@@ -464,3 +464,50 @@ for(f in c("celltype","bin")) res[[f]] <- factor(res[[f]], unique(res[[f]]))
 saveRDS(res, file="reprodScores_by_crwdBin.rds")
 ```
 
+
+# Are crowded regions overlapping more with (highly transcribed) promoters?
+
+```{r, fig.width=10, fig.height=3}
+crwd <- readRDS("crowdedness_per_context.rds")
+crwd2 <- 200*t(t(crwd)/attr(crwd, "nTFs"))/pmax(100L,width(crwd.gr))
+gene <- factor(readRDS("promoter_by_PREidx.rds"))
+names(cts) <- cts <- colnames(crwd2)
+
+gene.crwd <- aggregate(crwd2[!is.na(gene),], by=list(gene=gene[!is.na(gene)]), FUN=max)
+row.names(gene.crwd) <- gene.crwd[,1]
+m <- readRDS("PRE2gene_cellLines.rds")
+m$gene <- factor(m$gene, levels(gene))
+m <- m[!is.na(m$gene),]
+
+d <- dplyr::bind_rows(lapply(cts, \(ct){
+  links <- m[which(m$celltype==ct),]
+  links$isProm <- crwd.gr$isProm[links$PRE.id]
+  links$distal.crwd <- crwd2[links$PRE.id,ct]
+  ag <- aggregate(links$isProm, by=list(gene=links$gene), FUN=mean)
+  colnames(ag)[2] <- "proportion"
+  ag2 <- aggregate(links$isProm, by=list(gene=links$gene), FUN=sum)
+  ag$sum <- ag2$x
+  ag$meanDist <- aggregate(links$dist, by=list(gene=links$gene), FUN=mean, na.rm=TRUE)$x
+  ag$meanCrwd <- aggregate(links$distal.crwd, by=list(gene=links$gene), FUN=mean, na.rm=TRUE)$x
+  ag$crwd <- gene.crwd[as.integer(ag$gene),ct]
+  ag$crwd.bin <- cut(ag$crwd, breaks = c(-Inf,0,0.05,0.2,0.4,Inf))
+  levels(ag$crwd.bin) <- c("0", "(0,5%]", "(5%,20%]", "(20%,40%]", ">40%")
+  ag
+}), .id="celltype")
+
+saveRDS(d, file="propPromotersInDistal.rds")
+
+ggplot(d, aes(crwd.bin, proportion)) + geom_violin() + stat_summary(fun = "median") + theme_sleek() + facet_wrap(~celltype, nrow=1) + labs(x="Crowdedness bin", y="Proportion of 3D contacts\nwith promoters") +
+  theme(axis.text.x=element_text(angle=90, vjust=0.5, hjust=1))
+
+ggplot(d, aes(crwd.bin, sum)) + geom_boxplot(outliers = FALSE) + stat_summary() + theme_sleek() + facet_wrap(~celltype, nrow=1, scale="free_y") + labs(x="Crowdedness bin", y="Number of 3D contacts\nwith promoters") +
+  theme(axis.text.x=element_text(angle=90, vjust=0.5, hjust=1))
+
+
+ggplot(d, aes(crwd.bin, meanDist)) + stat_summary() + theme_sleek() + facet_wrap(~celltype, nrow=1) + labs(x="Crowdedness bin", y="Mean distance of 3D interactions") +
+  theme(axis.text.x=element_text(angle=90, vjust=0.5, hjust=1))
+
+ggplot(d, aes(crwd.bin, 100*meanCrwd)) + geom_boxplot(outliers = FALSE)  +  theme_sleek() + facet_wrap(~celltype, nrow=1, scale="free_y") + labs(x="Crowdedness bin", y="Mean crowdedness\nof distal contacts") +
+  theme(axis.text.x=element_text(angle=90, vjust=0.5, hjust=1))
+```
+
